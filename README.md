@@ -45,7 +45,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-local.ps1
 ### 在 VS Code 中打断点
 
 1. 如果后台运行过 `start-local.ps1`，先执行 `stop-local.ps1`，释放 8080、5173。
-2. 菜单“终端 → 运行任务 → 启动依赖”。
+2. 菜单“终端 → 运行任务 → 启动依赖”。该任务会停止本项目Docker应用，释放端口并启动本地模式依赖；不会停止其他Docker项目。F5也配置为先执行这个依赖任务。
 3. 等待 Java 扩展完成 Maven 导入，打开 `backend/src/main/java/com/lsy/minimall/MiniMallApplication.java`。
 4. 在“运行和调试”选择“MiniMall 后端调试”，按 F5；密钥从本地的 `deploy/local.env` 读取。
 5. 另一个终端运行“启动前端”任务；访问 5173。

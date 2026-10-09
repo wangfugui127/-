@@ -9,6 +9,8 @@
       "projectName": "minimall",
       "cwd": "${workspaceFolder}/backend",
       "envFile": "${workspaceFolder}/deploy/local.env",
+      "preLaunchTask": "启动依赖",
+      "vmArgs": "-Duser.timezone=UTC",
       "args": "--spring.profiles.active=local"
     }
   ]
