@@ -1,0 +1,166 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?required}
+      MYSQL_USER: ${MYSQL_USER:?required}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?required}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?required}
+      TZ: UTC
+    command:
+    - --character-set-server=utf8mb4
+    - --collation-server=utf8mb4_0900_ai_ci
+    - --default-time-zone=+00:00
+    ports:
+    - 127.0.0.1:13306:3306
+    volumes:
+    - mysql-data:/var/lib/mysql
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - MYSQL_PWD=$$MYSQL_PASSWORD mysql -h 127.0.0.1 -u$$MYSQL_USER -D$$MYSQL_DATABASE
+        -e 'SELECT 1'
+      interval: 10s
+      timeout: 5s
+      start_period: 40s
+      retries: 15
+    restart: unless-stopped
+  redis:
+    image: redis:7.4-alpine
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?required}
+    command:
+    - sh
+    - -c
+    - exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"
+    ports:
+    - 127.0.0.1:16379:6379
+    volumes:
+    - redis-data:/data
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - REDISCLI_AUTH=$$REDIS_PASSWORD redis-cli ping | grep -q PONG
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+  namesrv:
+    image: apache/rocketmq:5.3.2
+    command:
+    - sh
+    - mqnamesrv
+    environment:
+      JAVA_OPT_EXT: -Xms256m -Xmx256m -Xmn128m
+    ports:
+    - 127.0.0.1:9876:9876
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - bash -c 'echo > /dev/tcp/127.0.0.1/9876'
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 15
+    restart: unless-stopped
+  broker:
+    image: apache/rocketmq:5.3.2
+    command:
+    - sh
+    - mqbroker
+    - -n
+    - namesrv:9876
+    - -c
+    - /home/rocketmq/rocketmq-5.3.2/conf/broker.conf
+    environment:
+      JAVA_OPT_EXT: -Xms512m -Xmx512m -Xmn256m
+    depends_on:
+      namesrv:
+        condition: service_healthy
+      mq-volume-init:
+        condition: service_completed_successfully
+    ports:
+    - 127.0.0.1:10911:10911
+    - 127.0.0.1:10909:10909
+    volumes:
+    - ./broker.docker.conf:/home/rocketmq/rocketmq-5.3.2/conf/broker.conf:ro
+    - broker-store:/home/rocketmq/store
+    - broker-logs:/home/rocketmq/logs
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - bash -c 'echo > /dev/tcp/127.0.0.1/10911'
+      interval: 10s
+      timeout: 3s
+      start_period: 40s
+      retries: 15
+    restart: unless-stopped
+  mq-init:
+    image: apache/rocketmq:5.3.2
+    depends_on:
+      broker:
+        condition: service_healthy
+    command:
+    - bash
+    - -lc
+    - "set -e\nfor topic in minimall-order minimall-cache minimall-payment minimall-audit;\
+      \ do\n  count=0\n  until sh mqadmin updateTopic -n namesrv:9876 -b broker:10911\
+      \ -t \"$$topic\"; do\n    count=$$((count+1))\n    if [ \"$$count\" -ge 20 ];\
+      \ then exit 1; fi\n    sleep 2\n  done\ndone\n"
+    restart: 'no'
+  backend:
+    image: minimall-backend:0.1.0
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      DB_URL: jdbc:mysql://mysql:3306/${MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC
+      DB_USER: ${MYSQL_USER:?required}
+      DB_PASSWORD: ${MYSQL_PASSWORD:?required}
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?required}
+      ROCKETMQ_NAMESERVER: namesrv:9876
+      MOCK_PAYMENT_SECRET: ${MOCK_PAYMENT_SECRET:?required}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?required}
+      ORDER_TIMEOUT_MINUTES: ${ORDER_TIMEOUT_MINUTES:-10}
+      MESSAGING_ENABLED: 'true'
+      JOBS_ENABLED: 'true'
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mq-init:
+        condition: service_completed_successfully
+    ports:
+    - 127.0.0.1:8080:8080
+    restart: unless-stopped
+  frontend:
+    image: minimall-frontend:0.1.0
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+    - 127.0.0.1:8088:80
+    restart: unless-stopped
+  mq-volume-init:
+    image: apache/rocketmq:5.3.2
+    user: root
+    command:
+    - sh
+    - -c
+    - chown -R 3000:3000 /home/rocketmq/store /home/rocketmq/logs
+    volumes:
+    - broker-store:/home/rocketmq/store
+    - broker-logs:/home/rocketmq/logs
+    restart: 'no'
+volumes:
+  mysql-data: null
+  redis-data: null
+  broker-store: null
+  broker-logs: null

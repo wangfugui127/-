@@ -1,0 +1,16 @@
+.git
+.idea
+.vscode
+**/node_modules
+**/target
+**/dist
+**/.env
+**/.env.local
+deploy/local.env
+runtime
+artifacts
+**/*.log
+**/test-results
+**/playwright-report
+work
+outputs

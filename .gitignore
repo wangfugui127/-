@@ -1,0 +1,13 @@
+.idea/
+**/target/
+**/node_modules/
+**/dist/
+**/.env
+**/.env.local
+**/*.log
+runtime/
+artifacts/
+**/playwright-report/
+**/test-results/
+.env
+deploy/local.env

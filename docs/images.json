@@ -1,0 +1,18 @@
+[
+  {
+    "Id": "sha256:a029e8f9b43d5787231f356808792797ccf86083101cbb41321c02afc15a919f",
+    "RepoTags": [
+      "minimall-backend:0.1.0"
+    ],
+    "Created": "2026-10-09T12:18:01.273277315Z",
+    "Size": 180881593
+  },
+  {
+    "Id": "sha256:436fd4d759bbdc7f27fb022d537057f9453d72fa9a7e2d1f38936276ba67635e",
+    "RepoTags": [
+      "minimall-frontend:0.1.0"
+    ],
+    "Created": "2026-10-09T13:48:29.470466622Z",
+    "Size": 26399806
+  }
+]

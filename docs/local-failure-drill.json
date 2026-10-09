@@ -1,0 +1,9 @@
+{
+  "passed": true,
+  "brokerRecoveredOrderId": "92",
+  "scannerClosedOrderId": "93",
+  "brokerFailureRecovered": true,
+  "databaseScannerFallback": true,
+  "at": "2026-10-09T12:18:46.121Z",
+  "base": "http://127.0.0.1:8080"
+}

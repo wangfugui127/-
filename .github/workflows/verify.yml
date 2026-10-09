@@ -1,0 +1,35 @@
+name: verify
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - run: chmod +x backend/mvnw && cd backend && ./mvnw -B -ntp verify
+        env:
+          DOCKER_API_VERSION: '1.44'
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.21.0'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run type-check && npm run lint && npm run test:unit -- --run && npm run build
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f deploy/Dockerfile.backend -t minimall-backend:test .
+      - run: docker build -f deploy/Dockerfile.frontend -t minimall-frontend:test .

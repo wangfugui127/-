@@ -1,0 +1,21 @@
+{
+  "passed": true,
+  "requests": 40,
+  "workers": 12,
+  "activityStock": 10,
+  "success": 10,
+  "results": {
+    "SUCCESS": 10,
+    "STOCK_NOT_ENOUGH": 30
+  },
+  "durationMs": 790,
+  "throughputRps": 50.61,
+  "p50Ms": 196,
+  "p95Ms": 368,
+  "afterSaleStock": 0,
+  "afterCancelStock": 10,
+  "afterCloseProductStock": 20,
+  "note": "单机Windows Docker Desktop演示环境；只测本次40笔请求，注册登录不计入耗时，不代表生产容量。",
+  "at": "2026-10-09T13:52:52.631Z",
+  "base": "http://127.0.0.1:8088"
+}

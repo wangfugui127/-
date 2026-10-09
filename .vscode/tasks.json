@@ -1,0 +1,46 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "启动依赖",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File scripts/start-infra.ps1",
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "启动后端",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File scripts/start-backend.ps1",
+      "problemMatcher": [],
+      "isBackground": true
+    },
+    {
+      "label": "启动前端",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File scripts/start-frontend.ps1",
+      "problemMatcher": [],
+      "isBackground": true
+    },
+    {
+      "label": "后端测试",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File scripts/test-backend.ps1",
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "容器部署",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File scripts/start-docker.ps1",
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "运行Java示例",
+      "type": "shell",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-java-example.ps1",
+      "problemMatcher": []
+    }
+  ]
+}

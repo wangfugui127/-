@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "java",
+      "name": "MiniMall 后端调试",
+      "request": "launch",
+      "mainClass": "com.lsy.minimall.MiniMallApplication",
+      "projectName": "minimall",
+      "cwd": "${workspaceFolder}/backend",
+      "envFile": "${workspaceFolder}/deploy/local.env",
+      "args": "--spring.profiles.active=local"
+    }
+  ]
+}

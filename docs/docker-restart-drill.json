@@ -1,0 +1,8 @@
+{
+  "passed": true,
+  "persistedOrderId": "1",
+  "status": "COMPLETED",
+  "orderAndItemsPersisted": true,
+  "at": "2026-10-09T14:00:20.864Z",
+  "base": "http://127.0.0.1:8088"
+}

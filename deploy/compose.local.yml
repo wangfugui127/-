@@ -1,0 +1,4 @@
+services:
+  broker:
+    volumes:
+      - ./broker.local.conf:/home/rocketmq/rocketmq-5.3.2/conf/broker.conf:ro

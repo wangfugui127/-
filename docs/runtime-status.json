@@ -1,0 +1,70 @@
+{
+  "at": "2026-10-09T22:01:46.5116799+08:00",
+  "health": "UP",
+  "services": [
+    {
+      "Name": "minimall-docker-backend-1",
+      "Service": "backend",
+      "Image": "minimall-backend:0.1.0",
+      "State": "running",
+      "Health": "healthy",
+      "ExitCode": 0
+    },
+    {
+      "Name": "minimall-docker-broker-1",
+      "Service": "broker",
+      "Image": "apache/rocketmq:5.3.2",
+      "State": "running",
+      "Health": "healthy",
+      "ExitCode": 0
+    },
+    {
+      "Name": "minimall-docker-frontend-1",
+      "Service": "frontend",
+      "Image": "minimall-frontend:0.1.0",
+      "State": "running",
+      "Health": "healthy",
+      "ExitCode": 0
+    },
+    {
+      "Name": "minimall-docker-mq-init-1",
+      "Service": "mq-init",
+      "Image": "apache/rocketmq:5.3.2",
+      "State": "exited",
+      "Health": "",
+      "ExitCode": 0
+    },
+    {
+      "Name": "minimall-docker-mq-volume-init-1",
+      "Service": "mq-volume-init",
+      "Image": "apache/rocketmq:5.3.2",
+      "State": "exited",
+      "Health": "",
+      "ExitCode": 0
+    },
+    {
+      "Name": "minimall-docker-mysql-1",
+      "Service": "mysql",
+      "Image": "mysql:8.4",
+      "State": "running",
+      "Health": "healthy",
+      "ExitCode": 0
+    },
+    {
+      "Name": "minimall-docker-namesrv-1",
+      "Service": "namesrv",
+      "Image": "apache/rocketmq:5.3.2",
+      "State": "running",
+      "Health": "healthy",
+      "ExitCode": 0
+    },
+    {
+      "Name": "minimall-docker-redis-1",
+      "Service": "redis",
+      "Image": "redis:7.4-alpine",
+      "State": "running",
+      "Health": "healthy",
+      "ExitCode": 0
+    }
+  ]
+}

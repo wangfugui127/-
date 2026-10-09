@@ -1,0 +1,9 @@
+{
+  "bytes": 207316992,
+  "sha256": "e5a0d9201d7f949e40f78f5a6c11e10412e4204e8741af3b3f7fb319f4a66f42",
+  "path": "F:\\app\\images\\minimall-0.1.0.tar",
+  "images": [
+    "minimall-backend:0.1.0",
+    "minimall-frontend:0.1.0"
+  ]
+}

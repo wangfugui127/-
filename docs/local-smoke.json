@@ -1,0 +1,11 @@
+{
+  "passed": true,
+  "orderId": "2",
+  "paymentId": "2",
+  "cancelledOrderId": "3",
+  "duplicateOrder": true,
+  "duplicatePayment": true,
+  "apiCount": 34,
+  "at": "2026-10-09T12:07:11.871Z",
+  "base": "http://127.0.0.1:8080"
+}

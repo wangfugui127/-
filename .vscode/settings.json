@@ -1,0 +1,21 @@
+{
+  "java.jdt.ls.java.home": "F:\\app\\java\\jdk-21.0.12.1+1",
+  "java.configuration.runtimes": [
+    {
+      "name": "JavaSE-21",
+      "path": "F:\\app\\java\\jdk-21.0.12.1+1",
+      "default": true
+    }
+  ],
+  "java.import.maven.enabled": true,
+  "maven.executable.path": "F:\\app\\maven\\apache-maven-3.9.11\\bin\\mvn.cmd",
+  "java.configuration.updateBuildConfiguration": "automatic",
+  "terminal.integrated.env.windows": {
+    "JAVA_HOME": "F:\\app\\java\\jdk-21.0.12.1+1",
+    "MAVEN_HOME": "F:\\app\\maven\\apache-maven-3.9.11",
+    "PATH": "F:\\app\\node-minimall\\node-v24.21.0-win-x64;F:\\app\\java\\jdk-21.0.12.1+1\\bin;F:\\app\\maven\\apache-maven-3.9.11\\bin;${env:PATH}",
+    "NPM_CONFIG_CACHE": "F:\\app\\npm-cache-minimall",
+    "PLAYWRIGHT_BROWSERS_PATH": "F:\\app\\playwright"
+  },
+  "files.encoding": "utf8"
+}

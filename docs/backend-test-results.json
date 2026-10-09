@@ -1,0 +1,49 @@
+[
+  {
+    "suite": "com.lsy.minimall.ValuesTest",
+    "tests": 6,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 0.411,
+    "cases": [
+      "stableCanonicalJson",
+      "requestKeyBounds",
+      "invalidPrice",
+      "stableHash",
+      "invalidQuantity",
+      "exactMoney"
+    ]
+  },
+  {
+    "suite": "com.lsy.minimall.CommerceIT",
+    "tests": 21,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 54.686,
+    "cases": [
+      "competingBuyersCannotOversell",
+      "duplicatePaymentAndCallbackAreIdempotent",
+      "activityPoolAndLifetimeLimit",
+      "cartSettlementAndOwnership",
+      "paymentAndCancelRaceHasOneCoherentOutcome",
+      "concurrentSameKeyCreatesOneOrder",
+      "databaseClockAndJdbcDateTimesAreUtc",
+      "productCacheNullMarkerAndRefresh",
+      "stockAdjustmentIdempotencyAndZeroStock",
+      "multiProductFailureLeavesNoPartialOrder",
+      "malformedHttpContractReturnsClientErrors",
+      "callbackForgeryDoesNotPay",
+      "fulfillmentDoesNotDeductTwice",
+      "consumerFailureRollsBackBusinessAndDedup",
+      "ordinaryOrderAndCancellationAreAtomic",
+      "activityTimeAndCloseRulesAreEnforced",
+      "permissionAndJsonIdChecks",
+      "transactionRollsBackWhenOutboxInsertFails",
+      "keyConflictRejectedWithoutMutation",
+      "hotActivityCannotOversell",
+      "lateSuccessfulPaymentIsRefundedWithoutStockDuplication"
+    ]
+  }
+]

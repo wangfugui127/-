@@ -1,0 +1,29 @@
+{
+  "at": "2026-10-09",
+  "frontendUnitTests": 7,
+  "frontendUnitFailures": 0,
+  "typeCheckPassed": true,
+  "lintErrors": 0,
+  "lintWarnings": 0,
+  "productionBuildPassed": true,
+  "npmAuditVulnerabilities": 0,
+  "localBrowser": {
+    "base": "http://127.0.0.1:5173",
+    "tests": 5,
+    "failures": 0,
+    "seconds": 18.1
+  },
+  "dockerBrowser": {
+    "base": "http://127.0.0.1:8088",
+    "tests": 5,
+    "failures": 0,
+    "seconds": 16.9
+  },
+  "cases": [
+    "用户下单付款发货收货",
+    "后台新建商品调整库存",
+    "1440/390px响应式截图",
+    "购物车结算取消",
+    "限量下单取消保留资格"
+  ]
+}
