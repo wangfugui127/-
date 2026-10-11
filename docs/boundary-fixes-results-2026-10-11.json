@@ -1,0 +1,36 @@
+{
+  "date": "2026-10-11",
+  "java": "21.0.12.1",
+  "backend": [
+    {
+      "name": "com.lsy.minimall.ValuesTest",
+      "tests": "6",
+      "failures": "0",
+      "errors": "0",
+      "skipped": "0",
+      "time": "0.654"
+    },
+    {
+      "name": "com.lsy.minimall.CommerceIT",
+      "tests": "27",
+      "failures": "0",
+      "errors": "0",
+      "skipped": "0",
+      "time": "61.56"
+    }
+  ],
+  "backend_total": 33,
+  "frontend_unit_tests": 9,
+  "browser_tests": 7,
+  "browser_base_url": "http://127.0.0.1:8088",
+  "flyway_version": 4,
+  "checks": [
+    "failed payment retry for normal/seckill orders",
+    "stale callback isolation",
+    "per-attempt HTTP idempotency",
+    "atomic pending quota for different products and normal/seckill mix",
+    "cart foreign-key lock compatibility",
+    "cache stale refill rejection",
+    "frontend lost-response confirmation"
+  ]
+}

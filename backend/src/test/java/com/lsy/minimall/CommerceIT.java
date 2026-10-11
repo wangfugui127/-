@@ -66,7 +66,7 @@ class CommerceIT {
     r.add("spring.data.redis.password", () -> "");
   }
 
-  @Autowired Db db;
+  @MockitoSpyBean Db db;
   @Autowired Transactions tx;
   @Autowired ProductService products;
   @Autowired CartService carts;
@@ -82,7 +82,7 @@ class CommerceIT {
 
   @BeforeEach
   void setup() {
-    reset(events);
+    reset(events, db);
     for (String t :
         List.of(
             "consumer_event",
@@ -651,5 +651,143 @@ class CommerceIT {
     for (var e : pending) messages.consume("minimall-product-cache", Values.text(e.get("payload")));
     assertThrows(BusinessException.class, () -> products.detail(product));
     assertEquals("null", redis.opsForValue().get("product:detail:" + product));
+  }
+
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+  void failedPaymentRetriesOnSameOrderWithImmutableAttemptsAndStaleCallbackIsolation(boolean seckill) throws Exception {
+    long activity = seckill ? activity(3, db.now().minusSeconds(1), db.now().plusSeconds(3600)) : 0;
+    var order = seckill ? activities.buy(activity, user, Values.id(), activityBody()) : create(1);
+    long id = Values.num(order.get("id"));
+    String firstKey = Values.id(), retryKey = Values.id();
+    var failed = payments.create(id, user, "FAILURE", firstKey);
+    payments.simulate(Values.num(failed.get("paymentId")), Values.id());
+    assertEquals("FAILED", payments.detail(Values.num(failed.get("id")), user).get("status"));
+    assertEquals(failed.get("id"), payments.create(id, user, "FAILURE", firstKey).get("id"));
+    var pool = Executors.newFixedThreadPool(2);
+    try {
+      CountDownLatch start = new CountDownLatch(1);
+      var a = pool.submit(() -> { start.await(); return payments.create(id, user, "SUCCESS", retryKey); });
+      var b = pool.submit(() -> { start.await(); return payments.create(id, user, "SUCCESS", retryKey); });
+      start.countDown();
+      var next = a.get(10, TimeUnit.SECONDS);
+      assertEquals(next.get("id"), b.get(10, TimeUnit.SECONDS).get("id"));
+      assertNotEquals(failed.get("id"), next.get("id"));
+      assertEquals(2, db.count("SELECT COUNT(*) FROM payment_record WHERE order_id=?", id));
+      assertEquals("PAYMENT_IN_PROGRESS", assertThrows(BusinessException.class, () -> payments.create(id, user, "SUCCESS", Values.id())).code);
+      payments.simulate(Values.num(failed.get("id")), Values.id()); // Old outbox redelivery.
+      assertEquals("CREATED", payments.detail(Values.num(next.get("id")), user).get("status"));
+      assertEquals("PENDING_PAYMENT", orders.detail(id, user, false).get("status"));
+      payments.callback(callback(next, Values.id()));
+      assertEquals("PAID", orders.detail(id, user, false).get("status"));
+      assertEquals(next.get("id"), ((Map<?,?>) orders.detail(id, user, false).get("payment")).get("id"));
+      if (seckill) {
+        assertEquals(1, db.count("SELECT COUNT(*) FROM seckill_purchase WHERE order_id=?", id));
+        assertEquals(2, Values.num(db.require("SELECT stock_available FROM seckill_activity WHERE id=?", activity).get("stockAvailable")));
+      } else assertEquals(9, stock());
+    } finally { pool.shutdownNow(); }
+    mvc.perform(post("/api/v1/orders/" + id + "/mock-payments").header("Authorization", "Bearer " + token)
+        .header("Idempotency-Key", firstKey).contentType("application/json").content("{\"scenario\":\"FAILURE\"}"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.data.status").value("FAILED"));
+  }
+
+  @Test
+  void pendingQuotaIsAtomicAcrossDifferentProductsAndStillReplaysAtCapacity() throws Exception {
+    product = newProduct("充足库存", 100);
+    for (int i=0;i<19;i++) create(1);
+    List<Long> products = new ArrayList<>();
+    for (int i=0;i<8;i++) products.add(newProduct("并发商品"+i, 10));
+    CountDownLatch start = new CountDownLatch(1);
+    var pool = Executors.newFixedThreadPool(8);
+    Map<String,Object> winner = null;
+    String winnerKey = null;
+    long winnerProduct = 0;
+    try {
+      List<Future<Map<String,Object>>> jobs = new ArrayList<>();
+      List<String> keys = new ArrayList<>();
+      for (long p : products) {
+        String key = Values.id(); keys.add(key);
+        jobs.add(pool.submit(() -> { start.await(); try { return orders.create(user,key,body(p,1)); }
+          catch(BusinessException e) { assertEquals("PENDING_ORDER_LIMIT", e.code); return null; } }));
+      }
+      start.countDown();int success=0;
+      for(int i=0;i<jobs.size();i++) { var result=jobs.get(i).get(15,TimeUnit.SECONDS);if(result!=null){success++;winner=result;winnerKey=keys.get(i);winnerProduct=products.get(i);} }
+      assertEquals(1,success);
+      assertEquals(20,db.count("SELECT COUNT(*) FROM mall_order WHERE user_id=? AND status='PENDING_PAYMENT'",user));
+      assertEquals(winner.get("id"), orders.create(user,winnerKey,body(winnerProduct,1)).get("id"));
+      long activity=activity(3,db.now().minusSeconds(1),db.now().plusSeconds(3600));
+      assertEquals("PENDING_ORDER_LIMIT",assertThrows(BusinessException.class,()->activities.buy(activity,user,Values.id(),activityBody())).code);
+      assertEquals(0,db.count("SELECT COUNT(*) FROM seckill_purchase WHERE activity_id=?",activity));
+      assertEquals(3,Values.num(db.require("SELECT stock_available FROM seckill_activity WHERE id=?",activity).get("stockAvailable")));
+    } finally { pool.shutdownNow(); }
+  }
+
+  @Test
+  void invalidationFencesAReaderPausedAfterDatabaseRead() throws Exception {
+    // Drain earlier creation invalidations so this race targets a later committed update.
+    for(var e:db.rows("SELECT payload FROM outbox_event WHERE event_type='PRODUCT_CACHE_INVALIDATE'"))
+      messages.consume("minimall-product-cache",Values.text(e.get("payload")));
+    CountDownLatch read = new CountDownLatch(1), resume = new CountDownLatch(1);
+    var once = new java.util.concurrent.atomic.AtomicBoolean();
+    doAnswer(call -> {
+      Object row=call.callRealMethod();
+      if(once.compareAndSet(false,true)) { read.countDown();assertTrue(resume.await(10,TimeUnit.SECONDS)); }
+      return row;
+    }).when(db).require(eq("SELECT * FROM product WHERE id=?"),eq(product));
+    var pool=Executors.newSingleThreadExecutor();
+    try {
+      var load=pool.submit(() -> products.detail(product));
+      assertTrue(read.await(10,TimeUnit.SECONDS));
+      var latest=db.require("SELECT * FROM product WHERE id=? FOR UPDATE",product);
+      products.status(product,"OFF_SALE",Values.num(latest.get("version")),admin);
+      for(var e:db.rows("SELECT payload FROM outbox_event WHERE event_type='PRODUCT_CACHE_INVALIDATE'"))
+        messages.consume("minimall-product-cache",Values.text(e.get("payload")));
+      resume.countDown();
+      assertEquals("ON_SALE",load.get(10,TimeUnit.SECONDS).get("status"));
+      assertNull(redis.opsForValue().get("product:detail:"+product)); // Stale response was never cached.
+      assertThrows(BusinessException.class,()->products.detail(product));
+      assertEquals("null",redis.opsForValue().get("product:detail:"+product));
+    } finally { resume.countDown();pool.shutdownNow();reset(db); }
+  }
+
+  @Test
+  void creationGateDoesNotDeadlockWithCartForeignKeyChecks() throws Exception {
+    CountDownLatch productLocked=new CountDownLatch(1), creatorWaiting=new CountDownLatch(1);
+    var pool=Executors.newFixedThreadPool(2);
+    doAnswer(call -> {
+      if(Thread.currentThread().getName().equals("quota-order-creator")) creatorWaiting.countDown();
+      return call.callRealMethod();
+    }).when(db).require(eq("SELECT * FROM product WHERE id=? FOR UPDATE"),eq(product));
+    try {
+      var cart=pool.submit(() -> tx.run(() -> {
+        db.require("SELECT * FROM product WHERE id=? FOR UPDATE",product);
+        productLocked.countDown();
+        try { assertTrue(creatorWaiting.await(10,TimeUnit.SECONDS)); } catch(InterruptedException e){throw new RuntimeException(e);}
+        return carts.add(user,product,1);
+      }));
+      assertTrue(productLocked.await(10,TimeUnit.SECONDS));
+      var order=pool.submit(() -> { Thread.currentThread().setName("quota-order-creator");return create(1); });
+      assertNotNull(cart.get(15,TimeUnit.SECONDS));
+      assertNotNull(order.get(15,TimeUnit.SECONDS));
+      assertEquals(9,stock());
+    } finally { creatorWaiting.countDown();pool.shutdownNow();reset(db); }
+  }
+
+  @Test
+  void normalAndSeckillOrdersShareTheLastPendingSlot() throws Exception {
+    product=newProduct("混合订单库存",100);
+    for(int i=0;i<19;i++)create(1);
+    long activity=activity(3,db.now().minusSeconds(1),db.now().plusSeconds(3600));
+    long other=newProduct("普通订单商品",10);
+    CountDownLatch start=new CountDownLatch(1);var pool=Executors.newFixedThreadPool(2);
+    try {
+      Callable<Boolean> normal=()->{start.await();try {orders.create(user,Values.id(),body(other,1));return true;}
+        catch(BusinessException e){assertEquals("PENDING_ORDER_LIMIT",e.code);return false;}};
+      Callable<Boolean> seckill=()->{start.await();try {activities.buy(activity,user,Values.id(),activityBody());return true;}
+        catch(BusinessException e){assertEquals("PENDING_ORDER_LIMIT",e.code);return false;}};
+      var a=pool.submit(normal);var b=pool.submit(seckill);start.countDown();
+      assertNotEquals(a.get(15,TimeUnit.SECONDS),b.get(15,TimeUnit.SECONDS));
+      assertEquals(20,db.count("SELECT COUNT(*) FROM mall_order WHERE user_id=? AND status='PENDING_PAYMENT'",user));
+    } finally {pool.shutdownNow();}
   }
 }

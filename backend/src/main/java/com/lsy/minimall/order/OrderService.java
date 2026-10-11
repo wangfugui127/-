@@ -95,6 +95,10 @@ public class OrderService {
   @SuppressWarnings("unchecked")
   private Map<String, Object> createNormal(
       long user, String key, String hash, Map<String, Object> b) {
+    lockOrderCreator(user);
+    var replay = existing(user, key, hash);
+    if (replay != null) return replay;
+    requirePendingCapacity(user);
     List<Map<String, Object>> input = (List<Map<String, Object>>) b.get("items");
     List<String> carts = (List<String>) b.get("cartItemIds");
     if ("CART".equals(b.get("source"))) {
@@ -114,9 +118,6 @@ public class OrderService {
       }
       input.sort(Comparator.comparingLong(m -> Values.num(m.get("productId"))));
     }
-    if (db.count(
-            "SELECT COUNT(*) FROM mall_order WHERE user_id=? AND status='PENDING_PAYMENT'", user)
-        >= 20) throw BusinessException.conflict("PENDING_ORDER_LIMIT", "待付款订单过多，请先处理");
     List<Map<String, Object>> lines = new ArrayList<>();
     long total = 0;
     for (var item : input) {
@@ -159,6 +160,17 @@ public class OrderService {
       db.update("DELETE FROM cart_item WHERE id=? AND user_id=?", cart, user);
     afterCreate(id, user);
     return detail(id, user, false);
+  }
+
+  // Acquire before any snapshot read; all order-creation paths share this lock.
+  public void lockOrderCreator(long user) {
+    db.update("INSERT INTO order_creation_lock(user_id) VALUES (?) ON DUPLICATE KEY UPDATE user_id=VALUES(user_id)", user);
+    db.require("SELECT user_id FROM order_creation_lock WHERE user_id=? FOR UPDATE", user);
+  }
+
+  public void requirePendingCapacity(long user) {
+    if (db.count("SELECT COUNT(*) FROM mall_order WHERE user_id=? AND status='PENDING_PAYMENT'", user) >= 20)
+      throw BusinessException.conflict("PENDING_ORDER_LIMIT", "待付款订单过多，请先处理");
   }
 
   public Map<String, Object> existing(long user, String key, String hash) {
@@ -232,8 +244,8 @@ public class OrderService {
     order.put(
         "payment",
         db.row(
-            "SELECT id,payment_no,status,amount_fen,paid_at,refunded_at FROM payment_record WHERE"
-                + " order_id=?",
+            "SELECT id,payment_no,status,amount_fen,paid_at,refunded_at,request_key FROM payment_record WHERE"
+                + " order_id=? ORDER BY id DESC LIMIT 1",
             id));
     order.put("serverNow", db.now().toString());
     String state = Values.text(order.get("status"));

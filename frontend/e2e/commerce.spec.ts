@@ -140,3 +140,132 @@ test('限量活动可以抢购，取消后个人资格仍已使用', async ({ pa
   await expect(page.getByTestId('seckill-buy')).toHaveText('本场资格已使用')
   await expect(page.getByTestId('seckill-buy')).toBeDisabled()
 })
+
+for (const seckill of [false, true]) {
+  test(`${seckill ? '限量' : '普通'}订单支付失败后可以在原订单重新支付`, async ({
+    page,
+    request,
+  }) => {
+    const username = unique(),
+      password = 'WebTest!2026'
+    expect(
+      (await request.post('/api/v1/auth/register', { data: { username, password } })).ok(),
+    ).toBeTruthy()
+    const buyer = (
+      await (await request.post('/api/v1/auth/login', { data: { username, password } })).json()
+    ).data
+    const administrator = (
+      await (
+        await request.post('/api/v1/auth/login', {
+          data: { username: 'admin', password: adminPassword },
+        })
+      ).json()
+    ).data
+    const adminHeaders = { Authorization: `Bearer ${administrator.token}` }
+    const buyerHeaders = { Authorization: `Bearer ${buyer.token}` }
+    const productResponse = await request.post('/api/v1/admin/products', {
+      headers: adminHeaders,
+      data: {
+        name: `支付重试验收${Date.now()}`,
+        categoryCode: 'LIFE',
+        priceFen: 1990,
+        initialStock: 10,
+        imageUrl: '/images/cup.svg',
+      },
+    })
+    expect(productResponse.ok()).toBeTruthy()
+    const product = (await productResponse.json()).data
+    expect(
+      (
+        await request.post(`/api/v1/admin/products/${product.id}/status`, {
+          headers: adminHeaders,
+          data: { action: 'ON_SALE', version: product.version },
+        })
+      ).ok(),
+    ).toBeTruthy()
+    let activityId = ''
+    if (seckill) {
+      const response = await request.post('/api/v1/admin/seckill-activities', {
+        headers: adminHeaders,
+        data: {
+          productId: product.id,
+          title: `支付重试活动${Date.now()}`,
+          activityPriceFen: 990,
+          plannedStock: 3,
+          startAt: new Date(Date.now() - 60000).toISOString(),
+          endAt: new Date(Date.now() + 3600000).toISOString(),
+        },
+      })
+      expect(response.ok()).toBeTruthy()
+      const activity = (await response.json()).data
+      activityId = activity.id
+      expect(
+        (
+          await request.post(`/api/v1/admin/seckill-activities/${activity.id}/status`, {
+            headers: { ...adminHeaders, 'Idempotency-Key': `publish_${Date.now()}_retry` },
+            data: { action: 'PUBLISH', version: activity.version },
+          })
+        ).ok(),
+      ).toBeTruthy()
+    }
+    const receiver = { name: '支付重试验收', phone: '13800000001', address: '支付重试验收测试地址' }
+    const created = await request.post(
+      seckill ? `/api/v1/seckill-activities/${activityId}/orders` : '/api/v1/orders',
+      {
+        headers: { ...buyerHeaders, 'Idempotency-Key': `order_${Date.now()}_retry` },
+        data: seckill
+          ? { receiver, expectedTotalFen: 990 }
+          : {
+              source: 'DIRECT',
+              items: [{ productId: product.id, quantity: 1 }],
+              cartItemIds: [],
+              receiver,
+              expectedTotalFen: 1990,
+            },
+      },
+    )
+    expect(created.ok()).toBeTruthy()
+    const orderId = (await created.json()).data.id
+    await page.goto('/login')
+    await page.getByTestId('username').fill(username)
+    await page.getByTestId('password').fill(password)
+    await page.getByTestId('auth-submit').click()
+    await expect(page).toHaveURL(/products$/)
+    await page.goto(`/orders/${orderId}`)
+    await page.locator('.el-select').click()
+    await page.getByRole('option', { name: '支付失败', exact: true }).click()
+    await page.getByTestId('pay-order').click()
+    await expect(page.getByTestId('pay-order')).toHaveText('重新支付', { timeout: 30000 })
+    await expect(page.getByTestId('pay-order')).toBeEnabled()
+    const failed = (
+      await (await request.get(`/api/v1/orders/${orderId}`, { headers: buyerHeaders })).json()
+    ).data.payment
+    await page.reload()
+    await expect(page.getByTestId('pay-order')).toHaveText('重新支付')
+    mkdirSync('../docs/screenshots', { recursive: true })
+    await page.screenshot({
+      path: `../docs/screenshots/payment-retry-${seckill ? 'seckill' : 'normal'}.png`,
+      fullPage: true,
+    })
+    await page.getByTestId('pay-order').click() // Reload defaults to success.
+    await expect(page.getByTestId('order-status')).toHaveText('待发货', { timeout: 30000 })
+    await expect(page).toHaveURL(new RegExp(`orders/${orderId}$`))
+    const paid = (
+      await (await request.get(`/api/v1/orders/${orderId}`, { headers: buyerHeaders })).json()
+    ).data
+    expect(paid.payment.id).not.toBe(failed.id)
+    const old = (
+      await (await request.get(`/api/v1/payments/${failed.id}`, { headers: buyerHeaders })).json()
+    ).data
+    expect(old.status).toBe('FAILED')
+    if (seckill) {
+      const activity = (
+        await (
+          await request.get(`/api/v1/seckill-activities/${activityId}`, { headers: buyerHeaders })
+        ).json()
+      ).data
+      expect(activity.hasPurchased).toBe(true)
+      expect(Number(activity.stockAvailable)).toBe(2)
+    }
+  })
+}

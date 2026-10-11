@@ -60,7 +60,9 @@ public class MessageService {
             switch (Values.text(event.get("eventType"))) {
               case "ORDER_TIMEOUT_CHECK" -> orders.closeExpired(Values.num(data.get("orderId")));
               case "PRODUCT_CACHE_INVALIDATE" ->
-                  redis.delete("product:detail:" + data.get("productId"));
+                  redis.execute(new org.springframework.data.redis.core.script.DefaultRedisScript<>(
+                      "redis.call('INCR',KEYS[1]); return redis.call('DEL',KEYS[2])", Long.class),
+                      List.of("product:generation:" + data.get("productId"), "product:detail:" + data.get("productId")));
               case "MOCK_PAYMENT_REQUESTED" ->
                   payments.simulate(Values.num(data.get("paymentId")), id);
               case "MOCK_REFUND_REQUESTED" -> payments.refund(Values.num(data.get("paymentId")));

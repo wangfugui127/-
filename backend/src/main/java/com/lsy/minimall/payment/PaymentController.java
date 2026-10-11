@@ -19,12 +19,13 @@ public class PaymentController {
 
   @PostMapping("/orders/{id}/mock-payments")
   public ApiResponse<?> create(
-      @PathVariable long id, @RequestBody(required = false) Map<String, Object> b) {
+      @PathVariable long id, @RequestBody(required = false) Map<String, Object> b,
+      @RequestHeader(value = "Idempotency-Key", required = false) String requestKey) {
     return ApiResponse.ok(
         s.create(
             id,
             Actor.userId(),
-            b == null ? "SUCCESS" : Values.text(b.getOrDefault("scenario", "SUCCESS"))));
+            b == null ? "SUCCESS" : Values.text(b.getOrDefault("scenario", "SUCCESS")), requestKey));
   }
 
   @GetMapping("/payments/{id}")

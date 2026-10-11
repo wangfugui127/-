@@ -264,6 +264,10 @@ public class ActivityService {
     try {
       return tx.run(
           () -> {
+            orders.lockOrderCreator(user);
+            var replay = orders.existing(user, key, hash);
+            if (replay != null) return replay;
+            orders.requirePendingCapacity(user);
             var locate = db.require("SELECT product_id FROM seckill_activity WHERE id=?", id);
             long productId = Values.num(locate.get("productId"));
             var product = db.require("SELECT * FROM product WHERE id=? FOR UPDATE", productId);

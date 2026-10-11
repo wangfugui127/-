@@ -37,6 +37,11 @@ public class PaymentService {
   }
 
   public Map<String, Object> create(long orderId, long user, String scenario) {
+    return create(orderId, user, scenario, null);
+  }
+
+  public Map<String, Object> create(long orderId, long user, String scenario, String requestKey) {
+    if (requestKey != null) Values.requestKey(requestKey);
     if (!Set.of("SUCCESS", "FAILURE", "LATE_SUCCESS").contains(scenario))
       throw BusinessException.bad("模拟场景不正确");
     return tx.run(
@@ -44,8 +49,17 @@ public class PaymentService {
           var order =
               db.require(
                   "SELECT * FROM mall_order WHERE id=? AND user_id=? FOR UPDATE", orderId, user);
-          var old = db.row("SELECT * FROM payment_record WHERE order_id=?", orderId);
-          if (old != null) {
+          var replay = requestKey == null ? null : db.row("SELECT * FROM payment_record WHERE order_id=? AND request_key=?", orderId, requestKey);
+          if (replay != null) {
+            if (!scenario.equals(replay.get("mockScenario")))
+              throw BusinessException.conflict("IDEMPOTENCY_CONFLICT", "相同支付请求键内容不同");
+            replay.put("paymentId", replay.get("id"));
+            return replay;
+          }
+          var old = db.row("SELECT * FROM payment_record WHERE order_id=? ORDER BY id DESC LIMIT 1", orderId);
+          if (old != null && !"FAILED".equals(old.get("status"))) {
+            if (requestKey != null && "CREATED".equals(old.get("status")))
+              throw BusinessException.conflict("PAYMENT_IN_PROGRESS", "已有支付正在处理，请等待当前结果");
             if (!scenario.equals(old.get("mockScenario")))
               throw BusinessException.conflict("IDEMPOTENCY_CONFLICT", "支付场景不能在重试时修改");
             old.put("paymentId", old.get("id"));
@@ -63,7 +77,7 @@ public class PaymentService {
                   Values.id(),
                   orderId,
                   order.get("payableFen"),
-                  "PAY:" + orderId,
+                  requestKey == null ? Values.id() : requestKey,
                   scenario);
           int delay = 0;
           if (scenario.equals("LATE_SUCCESS"))

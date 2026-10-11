@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { api, money, time, orderLabels, type Row } from '../api'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { reliable } from '../reliable'
 const route = useRoute(),
   order = ref<Row | null>(null),
   busy = ref(false),
@@ -13,6 +14,7 @@ const route = useRoute(),
 let timer: ReturnType<typeof setInterval> | undefined,
   polling = false
 const payment = computed(() => order.value?.payment as Row | null)
+const canPay = computed(() => !payment.value || payment.value.status === 'FAILED')
 const remaining = computed(() =>
   order.value
     ? Math.max(
@@ -31,6 +33,10 @@ async function load() {
   try {
     order.value = await api('GET', `/orders/${route.params.id}`)
     clockOffset.value = new Date(String(order.value?.serverNow)).getTime() - Date.now()
+    const slot = `minimall.pending.payment.${route.params.id}`
+    const pending = sessionStorage.getItem(slot)
+    if (pending && payment.value?.requestKey === JSON.parse(pending).key)
+      sessionStorage.removeItem(slot)
     error.value = ''
   } catch {
     error.value = '订单暂时无法加载。'
@@ -39,9 +45,16 @@ async function load() {
 async function pay() {
   busy.value = true
   try {
-    await api('POST', `/orders/${route.params.id}/mock-payments`, { scenario: scenario.value })
+    await reliable(
+      'POST',
+      `/orders/${route.params.id}/mock-payments`,
+      { scenario: scenario.value },
+      `payment.${route.params.id}`,
+    )
     ElMessage.success('模拟支付已发起，正在等待结果')
     await load()
+  } catch {
+    error.value = '支付结果尚未确认，请重新加载订单后确认。'
   } finally {
     busy.value = false
   }
@@ -140,8 +153,11 @@ onUnmounted(() => {
         <p>{{ order.receiverName }} · {{ order.receiverPhone }}</p>
         <p>{{ order.receiverAddress }}</p>
         <div v-if="order.status === 'PENDING_PAYMENT'" class="order-actions">
+          <p v-if="payment?.status === 'FAILED'" class="muted">
+            支付失败，可在剩余时间内重新支付。
+          </p>
           <label
-            >模拟支付场景<el-select v-model="scenario" :disabled="Boolean(payment)"
+            >模拟支付场景<el-select v-model="scenario" :disabled="busy || !canPay"
               ><el-option label="支付成功" value="SUCCESS" /><el-option
                 label="支付失败"
                 value="FAILURE" /><el-option
@@ -149,11 +165,11 @@ onUnmounted(() => {
                 value="LATE_SUCCESS" /></el-select></label
           ><button
             class="primary wide"
-            :disabled="busy || remaining === 0 || Boolean(payment)"
+            :disabled="busy || remaining === 0 || !canPay"
             data-testid="pay-order"
             @click="pay"
           >
-            模拟付款</button
+            {{ payment?.status === 'FAILED' ? '重新支付' : '模拟付款' }}</button
           ><button
             class="secondary wide"
             :disabled="busy"

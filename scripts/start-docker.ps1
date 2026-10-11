@@ -1,12 +1,12 @@
-﻿param([switch]$SkipBuild)
+param([switch]$SkipBuild)
 $ErrorActionPreference='Stop'
 . "$PSScriptRoot/env.ps1"
-$asciiRoot='F:/app/workspaces/minimall'
+$asciiRoot='F:/app/workspaces/minimall-java'
 if(-not(Test-Path -LiteralPath $asciiRoot)) {
   New-Item -ItemType Directory (Split-Path $asciiRoot) -Force | Out-Null
   New-Item -ItemType Junction -Path $asciiRoot -Target $projectRoot | Out-Null
 }
-if((Get-Item -LiteralPath $asciiRoot).Target -ne $projectRoot){throw '英文入口已指向其他目录，请检查 F:/app/workspaces/minimall'}
+if((Get-Item -LiteralPath $asciiRoot).Target -ne $projectRoot){throw '英文入口已指向其他目录，请检查 F:/app/workspaces/minimall-java'}
 Push-Location $asciiRoot
 try {
   if(-not $SkipBuild) {

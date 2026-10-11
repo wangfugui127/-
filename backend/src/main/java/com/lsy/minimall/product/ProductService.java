@@ -83,6 +83,7 @@ public class ProductService {
     String lock = "lock:product-load:" + id;
     String owner = Values.id();
     boolean acquired = false;
+    String generation = null;
     try {
       String cached = redis.opsForValue().get(key);
       if (cached != null) {
@@ -110,6 +111,8 @@ public class ProductService {
         result.put("serverNow", Instant.now().toString());
         return result;
       }
+      generation = redis.opsForValue().get("product:generation:" + id);
+      if (generation == null) generation = "0";
     } catch (BusinessException e) {
       throw e;
     } catch (Exception e) {
@@ -121,17 +124,16 @@ public class ProductService {
       Product product = productMapper.selectById(id);
       if (product == null || !"ON_SALE".equals(product.status)) {
         try {
-          redis.opsForValue().set(key, "null", Duration.ofSeconds(20));
+          cacheIfCurrent(id, generation, lock, owner, "null", 20);
         } catch (Exception ignored) {
         }
         throw BusinessException.missing();
       }
       var row = db.require("SELECT * FROM product WHERE id=?", id);
+      if (!"ON_SALE".equals(row.get("status"))) throw BusinessException.missing();
       row.put("serverNow", db.now().toString());
       try {
-        redis
-            .opsForValue()
-            .set(key, Values.json(row), Duration.ofSeconds(60 + new Random().nextInt(61)));
+        cacheIfCurrent(id, generation, lock, owner, Values.json(row), 60 + new Random().nextInt(61));
       } catch (Exception ignored) {
       }
       return row;
@@ -149,6 +151,14 @@ public class ProductService {
         } catch (Exception ignored) {
         }
     }
+  }
+
+  private void cacheIfCurrent(long id, String generation, String lock, String owner, String payload, int ttl) {
+    if (generation == null) return; // Redis failed before the DB read; skip cache population.
+    redis.execute(new DefaultRedisScript<>(
+        "if (redis.call('GET',KEYS[1]) or '0')==ARGV[1] and redis.call('GET',KEYS[3])==ARGV[2] then "
+            + "redis.call('SET',KEYS[2],ARGV[3],'EX',ARGV[4]); return 1 end; return 0", Long.class),
+        List.of("product:generation:" + id, "product:detail:" + id, lock), generation, owner, payload, Integer.toString(ttl));
   }
 
   public Map<String, Object> create(Map<String, Object> b, long actor) {
