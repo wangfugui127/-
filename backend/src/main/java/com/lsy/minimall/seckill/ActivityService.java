@@ -4,6 +4,9 @@ import com.lsy.minimall.common.*;
 import com.lsy.minimall.infrastructure.*;
 import com.lsy.minimall.inventory.InventoryService;
 import com.lsy.minimall.order.OrderService;
+import com.lsy.minimall.persistence.MapperRows;
+import com.lsy.minimall.persistence.mapper.*;
+import com.lsy.minimall.product.ProductMapper;
 import java.sql.Timestamp;
 import java.time.*;
 import java.util.*;
@@ -14,7 +17,11 @@ import org.springframework.stereotype.Service;
 
 @Service
 public class ActivityService {
-  private final Db db;
+  private final ClockMapper clock;
+  private final MallOrderMapper orderMapper;
+  private final ProductMapper products;
+  private final SeckillActivityMapper activityMapper;
+  private final SeckillPurchaseMapper purchases;
   private final Transactions tx;
   private final InventoryService stock;
   private final OrderService orders;
@@ -23,14 +30,22 @@ public class ActivityService {
   private final StringRedisTemplate redis;
 
   public ActivityService(
-      Db db,
+      ClockMapper clock,
+      MallOrderMapper orderMapper,
+      ProductMapper products,
+      SeckillActivityMapper activityMapper,
+      SeckillPurchaseMapper purchases,
       Transactions tx,
       InventoryService stock,
       OrderService orders,
       Events events,
       Operations ops,
       StringRedisTemplate redis) {
-    this.db = db;
+    this.clock = clock;
+    this.orderMapper = orderMapper;
+    this.products = products;
+    this.activityMapper = activityMapper;
+    this.purchases = purchases;
     this.tx = tx;
     this.stock = stock;
     this.orders = orders;
@@ -42,25 +57,16 @@ public class ActivityService {
   public Map<String, Object> page(boolean admin, int page, int size, String status) {
     page = Math.max(1, page);
     size = Values.size(size);
-    String where = admin ? " WHERE 1=1" : " WHERE a.status<>'DRAFT'";
-    List<Object> args = new ArrayList<>();
-    if (status != null && !status.isBlank()) {
-      where += " AND a.status=?";
-      args.add(status);
-    }
-    long total = db.count("SELECT COUNT(*) FROM seckill_activity a" + where, args.toArray());
-    args.add(size);
-    args.add((page - 1) * size);
+    var result =
+        activityMapper.findPage(
+            new com.baomidou.mybatisplus.extension.plugins.pagination.Page<>(page, size),
+            admin,
+            status);
     return Map.of(
         "items",
-        db.rows(
-            "SELECT a.*,p.name product_name,p.image_url,p.price_fen original_price_fen FROM"
-                + " seckill_activity a JOIN product p ON p.id=a.product_id"
-                + where
-                + " ORDER BY a.id DESC LIMIT ? OFFSET ?",
-            args.toArray()),
+        MapperRows.list(result.getRecords()),
         "total",
-        total,
+        result.getTotal(),
         "page",
         page,
         "size",
@@ -68,21 +74,15 @@ public class ActivityService {
   }
 
   public Map<String, Object> detail(long id, Long user) {
-    var a =
-        db.require(
-            "SELECT a.*,p.name product_name,p.specification,p.image_url,p.price_fen"
-                + " original_price_fen FROM seckill_activity a JOIN product p ON p.id=a.product_id"
-                + " WHERE a.id=? AND a.status<>'DRAFT'",
-            id);
-    a.put("serverNow", db.now().toString());
+    var a = MapperRows.require(activityMapper.findPublicDetail(id));
+    a.put("serverNow", clock.now().toString());
+    var purchase = user == null ? null : purchases.findActiveByActivityAndUser(id, user);
+    a.put("hasPurchased", purchase != null);
     a.put(
-        "hasPurchased",
-        user != null
-            && db.count(
-                    "SELECT COUNT(*) FROM seckill_purchase WHERE activity_id=? AND user_id=?",
-                    id,
-                    user)
-                > 0);
+        "pendingOrderId",
+        purchase != null && "PENDING_PAYMENT".equals(purchase.get("orderStatus"))
+            ? purchase.get("orderId")
+            : null);
     return a;
   }
 
@@ -90,19 +90,16 @@ public class ActivityService {
     validate(b);
     return tx.run(
         () -> {
-          db.require("SELECT id FROM product WHERE id=?", Values.num(b.get("productId")));
+          MapperRows.require(products.findIdentityById(Values.num(b.get("productId"))));
           long id =
-              db.insert(
-                  "INSERT INTO"
-                      + " seckill_activity(product_id,title,activity_price_fen,planned_stock,start_at,end_at)"
-                      + " VALUES (?,?,?,?,?,?)",
+              activityMapper.createActivity(
                   Values.num(b.get("productId")),
                   b.get("title"),
                   Values.num(b.get("activityPriceFen")),
                   Values.num(b.get("plannedStock")),
                   Timestamp.from(Instant.parse(Values.text(b.get("startAt")))),
                   Timestamp.from(Instant.parse(Values.text(b.get("endAt")))));
-          var a = db.require("SELECT * FROM seckill_activity WHERE id=?", id);
+          var a = MapperRows.require(activityMapper.findById(id));
           events.log("ACTIVITY_CREATE", "ACTIVITY", id, actor, null, a, null);
           return a;
         });
@@ -112,21 +109,18 @@ public class ActivityService {
     validate(b);
     return tx.run(
         () -> {
-          var initial = db.require("SELECT product_id FROM seckill_activity WHERE id=?", id);
+          var initial = MapperRows.require(activityMapper.findProductIdentityById(id));
           var locks = new TreeSet<Long>();
           locks.add(Values.num(initial.get("productId")));
           locks.add(Values.num(b.get("productId")));
           for (long product : locks)
-            db.require("SELECT id FROM product WHERE id=? FOR UPDATE", product);
-          var a = db.require("SELECT * FROM seckill_activity WHERE id=? FOR UPDATE", id);
+            MapperRows.require(products.findIdentityByIdForUpdate(product));
+          var a = MapperRows.require(activityMapper.findByIdForUpdate(id));
           if (!"DRAFT".equals(a.get("status")))
             throw BusinessException.conflict("ACTIVITY_STATE_CONFLICT", "只能修改草稿");
           if (Values.num(a.get("version")) != Values.num(b.get("version")))
             throw BusinessException.conflict("VERSION_CONFLICT", "活动已被修改");
-          db.update(
-              "UPDATE seckill_activity SET"
-                  + " product_id=?,title=?,activity_price_fen=?,planned_stock=?,start_at=?,end_at=?,version=version+1"
-                  + " WHERE id=?",
+          activityMapper.editActivity(
               Values.num(b.get("productId")),
               b.get("title"),
               Values.num(b.get("activityPriceFen")),
@@ -135,7 +129,7 @@ public class ActivityService {
               Timestamp.from(Instant.parse(Values.text(b.get("endAt")))),
               id);
           events.log("ACTIVITY_EDIT", "ACTIVITY", id, actor, a, b, null);
-          return db.require("SELECT * FROM seckill_activity WHERE id=?", id);
+          return MapperRows.require(activityMapper.findById(id));
         });
   }
 
@@ -151,10 +145,10 @@ public class ActivityService {
         key,
         b,
         () -> {
-          var initial = db.require("SELECT product_id FROM seckill_activity WHERE id=?", id);
+          var initial = MapperRows.require(activityMapper.findProductIdentityById(id));
           long product = Values.num(initial.get("productId"));
-          var p = db.require("SELECT * FROM product WHERE id=? FOR UPDATE", product);
-          var a = db.require("SELECT * FROM seckill_activity WHERE id=? FOR UPDATE", id);
+          var p = MapperRows.require(products.findByIdForUpdate(product));
+          var a = MapperRows.require(activityMapper.findByIdForUpdate(id));
           if (product != Values.num(a.get("productId")))
             throw BusinessException.conflict("VERSION_CONFLICT", "活动商品已被更改，请刷新");
           if (Values.num(a.get("version")) != Values.num(b.get("version")))
@@ -163,22 +157,12 @@ public class ActivityService {
           if (action.equals("PUBLISH")) {
             if (!state.equals("DRAFT")
                 || !"ON_SALE".equals(p.get("status"))
-                || !db.now().isBefore(Instant.parse(Values.text(a.get("endAt")))))
+                || !clock.now().isBefore(Instant.parse(Values.text(a.get("endAt")))))
               throw BusinessException.conflict("ACTIVITY_STATE_CONFLICT", "当前活动不可发布");
-            if (db.count(
-                    "SELECT COUNT(*) FROM seckill_activity WHERE product_id=? AND id<>? AND"
-                        + " status='PUBLISHED' AND start_at<? AND end_at>?",
-                    product,
-                    id,
-                    a.get("endAt"),
-                    a.get("startAt"))
-                > 0) throw BusinessException.conflict("ACTIVITY_OVERLAP", "同商品活动时间重叠");
+            if (activityMapper.countOverlapping(product, id, a.get("endAt"), a.get("startAt")) > 0)
+              throw BusinessException.conflict("ACTIVITY_OVERLAP", "同商品活动时间重叠");
             int n = Math.toIntExact(Values.num(a.get("plannedStock")));
-            db.update(
-                "UPDATE seckill_activity SET stock_total=?,status='PUBLISHED',version=version+1"
-                    + " WHERE id=?",
-                n,
-                id);
+            activityMapper.publishActivity(n, id);
             stock.change(
                 "PRODUCT",
                 product,
@@ -202,16 +186,12 @@ public class ActivityService {
           } else if (action.equals("DISABLE")) {
             if (!Set.of("PUBLISHED", "ENDED").contains(state))
               throw BusinessException.conflict("ACTIVITY_STATE_CONFLICT", "活动不可停用");
-            db.update(
-                "UPDATE seckill_activity SET status='DISABLED',version=version+1 WHERE id=?", id);
+            activityMapper.disableActivity(id);
           } else {
             if (!Set.of("DISABLED", "ENDED").contains(state))
               throw BusinessException.conflict("ACTIVITY_STATE_CONFLICT", "先停用或等待活动结束");
-            if (db.count(
-                    "SELECT COUNT(*) FROM mall_order WHERE activity_id=? AND"
-                        + " status='PENDING_PAYMENT'",
-                    id)
-                > 0) throw BusinessException.conflict("ACTIVITY_PENDING_ORDERS", "活动仍有待付款订单");
+            if (orderMapper.countPendingByActivity(id) > 0)
+              throw BusinessException.conflict("ACTIVITY_PENDING_ORDERS", "活动仍有待付款订单");
             int n = Math.toIntExact(Values.num(a.get("stockAvailable")));
             if (n > 0) {
               stock.change(
@@ -235,10 +215,9 @@ public class ActivityService {
                   id,
                   actor);
             }
-            db.update(
-                "UPDATE seckill_activity SET status='CLOSED',version=version+1 WHERE id=?", id);
+            activityMapper.closeActivity(id);
           }
-          return db.require("SELECT * FROM seckill_activity WHERE id=?", id);
+          return MapperRows.require(activityMapper.findById(id));
         });
   }
 
@@ -268,13 +247,26 @@ public class ActivityService {
             var replay = orders.existing(user, key, hash);
             if (replay != null) return replay;
             orders.requirePendingCapacity(user);
-            var locate = db.require("SELECT product_id FROM seckill_activity WHERE id=?", id);
+            // 资格写入都在用户下单锁内；先锁旧订单，再锁商品/活动，和取消的锁顺序一致。
+            var purchase = purchases.findByActivityAndUser(id, user);
+            if (purchase != null) {
+              var previousOrder =
+                  MapperRows.require(
+                      orderMapper.findByIdAndUserForUpdate(purchase.get("orderId"), user));
+              if (!Set.of("CANCELLED", "CLOSED").contains(Values.text(previousOrder.get("status"))))
+                throw BusinessException.conflict(
+                    "PURCHASE_LIMIT_REACHED",
+                    "PENDING_PAYMENT".equals(previousOrder.get("status"))
+                        ? "本活动已有待付款订单，请前往原订单继续支付"
+                        : "本活动已购买，不能重复购买");
+            }
+            var locate = MapperRows.require(activityMapper.findProductIdentityById(id));
             long productId = Values.num(locate.get("productId"));
-            var product = db.require("SELECT * FROM product WHERE id=? FOR UPDATE", productId);
-            var a = db.require("SELECT * FROM seckill_activity WHERE id=? FOR UPDATE", id);
+            var product = MapperRows.require(products.findByIdForUpdate(productId));
+            var a = MapperRows.require(activityMapper.findByIdForUpdate(id));
             if (productId != Values.num(a.get("productId")))
               throw BusinessException.conflict("VERSION_CONFLICT", "活动已更新");
-            Instant now = db.now();
+            Instant now = clock.now();
             if (now.isBefore(Instant.parse(Values.text(a.get("startAt")))))
               throw BusinessException.conflict("ACTIVITY_NOT_STARTED", "活动尚未开始");
             if (!now.isBefore(Instant.parse(Values.text(a.get("endAt"))))
@@ -282,22 +274,17 @@ public class ActivityService {
               throw BusinessException.conflict("ACTIVITY_ENDED", "活动已结束或停用");
             if (!"ON_SALE".equals(product.get("status")))
               throw BusinessException.conflict("PRODUCT_UNAVAILABLE", "商品已下架");
-            if (db.count(
-                    "SELECT COUNT(*) FROM seckill_purchase WHERE activity_id=? AND user_id=?",
-                    id,
-                    user)
-                > 0)
-              throw BusinessException.conflict("PURCHASE_LIMIT_REACHED", "本活动每人只能成功下单一次，取消不恢复资格");
             if (expected != Values.num(a.get("activityPriceFen")))
               throw BusinessException.conflict("PRICE_CHANGED", "请刷新活动价格");
             long orderId = orders.insertOrder(user, key, hash, "SECKILL", id, expected, rec);
             orders.insertItem(orderId, product, 1, expected, "ACTIVITY", id);
-            db.update(
-                "INSERT INTO seckill_purchase(activity_id,user_id,order_id) VALUES (?,?,?)",
-                id,
-                user,
-                orderId);
-            var o = db.require("SELECT order_no FROM mall_order WHERE id=?", orderId);
+            if (purchase == null) {
+              purchases.recordPurchase(id, user, orderId);
+            } else if (purchases.replaceReleasedPurchase(id, user, purchase.get("orderId"), orderId)
+                != 1) {
+              throw BusinessException.conflict("VERSION_CONFLICT", "活动资格已更新，请刷新重试");
+            }
+            var o = MapperRows.require(orderMapper.findOrderNoById(orderId));
             stock.change(
                 "ACTIVITY",
                 id,
@@ -314,9 +301,8 @@ public class ActivityService {
     } catch (DuplicateKeyException e) {
       old = orders.existing(user, key, hash);
       if (old != null) return old;
-      if (db.count(
-              "SELECT COUNT(*) FROM seckill_purchase WHERE activity_id=? AND user_id=?", id, user)
-          > 0) throw BusinessException.conflict("PURCHASE_LIMIT_REACHED", "本活动资格已使用");
+      if (purchases.countByActivityAndUser(id, user) > 0)
+        throw BusinessException.conflict("PURCHASE_LIMIT_REACHED", "本活动资格已使用");
       throw e;
     }
   }

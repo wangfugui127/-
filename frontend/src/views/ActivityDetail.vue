@@ -90,8 +90,15 @@ onUnmounted(() => {
         ></span>
       </div>
       <p>剩余 {{ a.stockAvailable }} 件</p>
-      <p class="rule-note">每人每场活动最多成功下单一次。取消后库存归还，但个人资格不恢复。</p>
-      <form @submit.prevent="buy">
+      <p class="rule-note">每场活动每人限购一次。取消或超时关闭后可重新抢购，支付失败请在原订单重试。</p>
+      <RouterLink
+        v-if="a.pendingOrderId"
+        :to="`/orders/${a.pendingOrderId}`"
+        class="primary wide"
+        data-testid="continue-payment"
+        >继续支付</RouterLink
+      >
+      <form v-else @submit.prevent="buy">
         <label
           >收货人<input
             v-model="receiver.name"

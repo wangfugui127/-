@@ -2,6 +2,8 @@ package com.lsy.minimall.infrastructure;
 
 import com.lsy.minimall.auth.AuthService;
 import com.lsy.minimall.common.Values;
+import com.lsy.minimall.persistence.mapper.*;
+import com.lsy.minimall.product.ProductMapper;
 import com.lsy.minimall.product.ProductService;
 import com.lsy.minimall.seckill.ActivityService;
 import java.time.*;
@@ -14,7 +16,9 @@ import org.springframework.stereotype.Component;
 @Component
 public class Bootstrap implements ApplicationRunner {
   private final AuthService auth;
-  private final Db db;
+  private final ClockMapper clock;
+  private final MallUserMapper users;
+  private final ProductMapper productMapper;
   private final ProductService products;
   private final ActivityService activities;
   private final String password;
@@ -22,13 +26,17 @@ public class Bootstrap implements ApplicationRunner {
 
   public Bootstrap(
       AuthService auth,
-      Db db,
+      ClockMapper clock,
+      MallUserMapper users,
+      ProductMapper productMapper,
       ProductService products,
       ActivityService activities,
       @Value("${app.bootstrap.admin-password:}") String password,
       @Value("${app.bootstrap.seed-demo:true}") boolean seed) {
     this.auth = auth;
-    this.db = db;
+    this.clock = clock;
+    this.users = users;
+    this.productMapper = productMapper;
     this.products = products;
     this.activities = activities;
     this.password = password;
@@ -37,8 +45,8 @@ public class Bootstrap implements ApplicationRunner {
 
   public void run(ApplicationArguments args) {
     auth.bootstrap(password);
-    if (!seed || db.count("SELECT COUNT(*) FROM product") > 0) return;
-    var admin = db.row("SELECT id FROM mall_user WHERE username='admin'");
+    if (!seed || productMapper.countAll() > 0) return;
+    var admin = users.findAdministratorIdentity();
     if (admin == null) return;
     long actor = Values.num(admin.get("id"));
     String[][] items = {
@@ -70,7 +78,7 @@ public class Bootstrap implements ApplicationRunner {
       products.status(Values.num(p.get("id")), "ON_SALE", Values.num(p.get("version")), actor);
       if (first == 0) first = Values.num(p.get("id"));
     }
-    Instant now = db.now();
+    Instant now = clock.now();
     var a =
         activities.create(
             Map.of(

@@ -3,6 +3,8 @@ package com.lsy.minimall.payment;
 import com.lsy.minimall.common.*;
 import com.lsy.minimall.infrastructure.*;
 import com.lsy.minimall.order.OrderService;
+import com.lsy.minimall.persistence.MapperRows;
+import com.lsy.minimall.persistence.mapper.*;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.*;
@@ -15,19 +17,28 @@ import org.springframework.stereotype.Service;
 
 @Service
 public class PaymentService {
-  private final Db db;
+  private final ClockMapper clock;
+  private final ConsumerEventMapper consumerEvents;
+  private final MallOrderMapper orderMapper;
+  private final PaymentRecordMapper paymentRecords;
   private final Transactions tx;
   private final OrderService orders;
   private final Events events;
   private final String secret;
 
   public PaymentService(
-      Db db,
+      ClockMapper clock,
+      ConsumerEventMapper consumerEvents,
+      MallOrderMapper orderMapper,
+      PaymentRecordMapper paymentRecords,
       Transactions tx,
       OrderService orders,
       Events events,
       @Value("${app.mock-payment.secret}") String secret) {
-    this.db = db;
+    this.clock = clock;
+    this.consumerEvents = consumerEvents;
+    this.orderMapper = orderMapper;
+    this.paymentRecords = paymentRecords;
     this.tx = tx;
     this.orders = orders;
     this.events = events;
@@ -46,17 +57,16 @@ public class PaymentService {
       throw BusinessException.bad("模拟场景不正确");
     return tx.run(
         () -> {
-          var order =
-              db.require(
-                  "SELECT * FROM mall_order WHERE id=? AND user_id=? FOR UPDATE", orderId, user);
-          var replay = requestKey == null ? null : db.row("SELECT * FROM payment_record WHERE order_id=? AND request_key=?", orderId, requestKey);
+          var order = MapperRows.require(orderMapper.findByIdAndUserForUpdate(orderId, user));
+          var replay =
+              requestKey == null ? null : paymentRecords.findByOrderAndRequest(orderId, requestKey);
           if (replay != null) {
             if (!scenario.equals(replay.get("mockScenario")))
               throw BusinessException.conflict("IDEMPOTENCY_CONFLICT", "相同支付请求键内容不同");
             replay.put("paymentId", replay.get("id"));
             return replay;
           }
-          var old = db.row("SELECT * FROM payment_record WHERE order_id=? ORDER BY id DESC LIMIT 1", orderId);
+          var old = paymentRecords.findLatestByOrder(orderId);
           if (old != null && !"FAILED".equals(old.get("status"))) {
             if (requestKey != null && "CREATED".equals(old.get("status")))
               throw BusinessException.conflict("PAYMENT_IN_PROGRESS", "已有支付正在处理，请等待当前结果");
@@ -67,13 +77,10 @@ public class PaymentService {
           }
           if (!"PENDING_PAYMENT".equals(order.get("status")))
             throw BusinessException.conflict("ORDER_STATE_CONFLICT", "当前订单不可付款");
-          if (!db.now().isBefore(Instant.parse(Values.text(order.get("expiresAt")))))
+          if (!clock.now().isBefore(Instant.parse(Values.text(order.get("expiresAt")))))
             throw BusinessException.conflict("ORDER_EXPIRED", "订单已超过付款期限");
           long id =
-              db.insert(
-                  "INSERT INTO"
-                      + " payment_record(payment_no,order_id,amount_fen,currency,status,request_key,mock_scenario)"
-                      + " VALUES (?,?,?,'CNY','CREATED',?,?)",
+              paymentRecords.createPayment(
                   Values.id(),
                   orderId,
                   order.get("payableFen"),
@@ -82,7 +89,7 @@ public class PaymentService {
           int delay = 0;
           if (scenario.equals("LATE_SUCCESS"))
             delay =
-                Duration.between(db.now(), Instant.parse(Values.text(order.get("expiresAt"))))
+                Duration.between(clock.now(), Instant.parse(Values.text(order.get("expiresAt"))))
                             .toSeconds()
                         <= 60
                     ? 5
@@ -93,18 +100,14 @@ public class PaymentService {
               id,
               Map.of("paymentId", Long.toString(id)),
               delay);
-          var result = db.require("SELECT * FROM payment_record WHERE id=?", id);
+          var result = MapperRows.require(paymentRecords.findById(id));
           result.put("paymentId", Long.toString(id));
           return result;
         });
   }
 
   public Map<String, Object> detail(long id, long user) {
-    return db.require(
-        "SELECT p.* FROM payment_record p JOIN mall_order o ON o.id=p.order_id WHERE p.id=? AND"
-            + " o.user_id=?",
-        id,
-        user);
+    return MapperRows.require(paymentRecords.findOwnedPayment(id, user));
   }
 
   public String sign(String timestamp, String body) {
@@ -142,11 +145,7 @@ public class PaymentService {
         result = Values.required(b.get("result"), 16);
     if (!Set.of("SUCCESS", "FAILED").contains(result)) throw BusinessException.bad("支付结果无效");
     String hash = Values.hash(Values.json(b));
-    var old =
-        db.row(
-            "SELECT * FROM consumer_event WHERE consumer_name='mock-payment-callback' AND"
-                + " event_id=?",
-            callbackId);
+    var old = consumerEvents.findPaymentCallback(callbackId);
     if (old != null) {
       if (!hash.equals(old.get("payloadHash")))
         throw BusinessException.conflict("CALLBACK_CONFLICT", "回调标识内容冲突");
@@ -155,11 +154,7 @@ public class PaymentService {
     try {
       return tx.run(() -> processCallback(b, callbackId, no, trade, result, hash));
     } catch (DuplicateKeyException e) {
-      old =
-          db.row(
-              "SELECT * FROM consumer_event WHERE consumer_name='mock-payment-callback' AND"
-                  + " event_id=?",
-              callbackId);
+      old = consumerEvents.findPaymentCallback(callbackId);
       if (old != null && hash.equals(old.get("payloadHash")))
         return Map.of("processed", true, "duplicate", true);
       throw e;
@@ -168,10 +163,10 @@ public class PaymentService {
 
   private Map<String, Object> processCallback(
       Map<String, Object> b, String cb, String no, String trade, String result, String hash) {
-    var locate = db.require("SELECT order_id FROM payment_record WHERE payment_no=?", no);
+    var locate = MapperRows.require(paymentRecords.findOrderIdentityByPaymentNo(no));
     long orderId = Values.num(locate.get("orderId"));
-    var order = db.require("SELECT * FROM mall_order WHERE id=? FOR UPDATE", orderId);
-    var pay = db.require("SELECT * FROM payment_record WHERE payment_no=? FOR UPDATE", no);
+    var order = MapperRows.require(orderMapper.findByIdForUpdate(orderId));
+    var pay = MapperRows.require(paymentRecords.findByPaymentNoForUpdate(no));
     if (Values.num(b.get("amountFen")) != Values.num(pay.get("amountFen"))
         || !"CNY".equals(b.get("currency"))
         || !trade.equals("MOCK:" + no))
@@ -179,33 +174,16 @@ public class PaymentService {
     boolean failure = "FAILURE".equals(pay.get("mockScenario"));
     if (failure && !result.equals("FAILED") || !failure && !result.equals("SUCCESS"))
       throw BusinessException.conflict("PAYMENT_MISMATCH", "回调与模拟渠道结果不符");
-    db.update(
-        "INSERT INTO consumer_event(consumer_name,event_id,payload_hash,result_code) VALUES"
-            + " ('mock-payment-callback',?,?,'PROCESSED')",
-        cb,
-        hash);
+    consumerEvents.recordPaymentCallback(cb, hash);
     if (!"CREATED".equals(pay.get("status"))) return Map.of("processed", true, "duplicate", true);
     if (result.equals("FAILED")) {
-      db.update(
-          "UPDATE payment_record SET"
-              + " status='FAILED',failure_reason='模拟支付失败',provider_trade_no=?,version=version+1"
-              + " WHERE id=?",
-          trade,
-          pay.get("id"));
+      paymentRecords.markFailed(trade, pay.get("id"));
       return Map.of("processed", true);
     }
-    boolean expired = !db.now().isBefore(Instant.parse(Values.text(order.get("expiresAt"))));
+    boolean expired = !clock.now().isBefore(Instant.parse(Values.text(order.get("expiresAt"))));
     if ("PENDING_PAYMENT".equals(order.get("status")) && !expired) {
-      db.update(
-          "UPDATE mall_order SET status='PAID',paid_at=UTC_TIMESTAMP(3),version=version+1 WHERE"
-              + " id=? AND status='PENDING_PAYMENT'",
-          orderId);
-      db.update(
-          "UPDATE payment_record SET"
-              + " status='SUCCEEDED',provider_trade_no=?,paid_at=UTC_TIMESTAMP(3),version=version+1"
-              + " WHERE id=?",
-          trade,
-          pay.get("id"));
+      orderMapper.markPaid(orderId);
+      paymentRecords.markSucceeded(trade, pay.get("id"));
       events.log(
           "ORDER_PAY",
           "ORDER",
@@ -217,12 +195,7 @@ public class PaymentService {
     } else {
       if ("PENDING_PAYMENT".equals(order.get("status")))
         orders.closeLocked(order, "CLOSED", "支付回调到达时已超期", null);
-      db.update(
-          "UPDATE payment_record SET"
-              + " status='REFUND_PENDING',provider_trade_no=?,paid_at=UTC_TIMESTAMP(3),version=version+1"
-              + " WHERE id=?",
-          trade,
-          pay.get("id"));
+      paymentRecords.markRefundPending(trade, pay.get("id"));
       events.add(
           "MOCK_REFUND_REQUESTED",
           "PAYMENT",
@@ -234,7 +207,7 @@ public class PaymentService {
   }
 
   public void simulate(long id, String eventId) {
-    var pay = db.require("SELECT * FROM payment_record WHERE id=?", id);
+    var pay = MapperRows.require(paymentRecords.findById(id));
     Map<String, Object> b = new LinkedHashMap<>();
     b.put("callbackId", eventId + ":pay");
     b.put("paymentNo", pay.get("paymentNo"));
@@ -249,15 +222,11 @@ public class PaymentService {
   public void refund(long id) {
     tx.run(
         () -> {
-          var locate = db.require("SELECT order_id FROM payment_record WHERE id=?", id);
-          db.require("SELECT id FROM mall_order WHERE id=? FOR UPDATE", locate.get("orderId"));
-          var pay = db.require("SELECT * FROM payment_record WHERE id=? FOR UPDATE", id);
+          var locate = MapperRows.require(paymentRecords.findOrderIdentityById(id));
+          MapperRows.require(orderMapper.findIdentityByIdForUpdate(locate.get("orderId")));
+          var pay = MapperRows.require(paymentRecords.findByIdForUpdate(id));
           if (!"REFUND_PENDING".equals(pay.get("status"))) return;
-          db.update(
-              "UPDATE payment_record SET"
-                  + " status='REFUNDED',refunded_at=UTC_TIMESTAMP(3),version=version+1 WHERE id=?"
-                  + " AND status='REFUND_PENDING'",
-              id);
+          paymentRecords.markRefunded(id);
           events.log(
               "MOCK_REFUND",
               "PAYMENT",

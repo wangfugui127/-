@@ -1,15 +1,20 @@
 package com.lsy.minimall.infrastructure;
 
 import com.lsy.minimall.common.Values;
+import com.lsy.minimall.persistence.mapper.*;
 import java.util.*;
 import org.springframework.stereotype.Component;
 
 @Component
 public class Events {
-  private final Db db;
+  private final ClockMapper clock;
+  private final OperationLogMapper operationLogs;
+  private final OutboxEventMapper outbox;
 
-  public Events(Db db) {
-    this.db = db;
+  public Events(ClockMapper clock, OperationLogMapper operationLogs, OutboxEventMapper outbox) {
+    this.clock = clock;
+    this.operationLogs = operationLogs;
+    this.outbox = outbox;
   }
 
   public void add(String type, String aggregate, long id, Map<String, Object> data, int delay) {
@@ -39,21 +44,10 @@ public class Events {
             "aggregateId",
             Long.toString(id),
             "occurredAt",
-            db.now().toString(),
+            clock.now().toString(),
             "data",
             data);
-    db.update(
-        "INSERT INTO"
-            + " outbox_event(event_id,event_type,aggregate_type,aggregate_id,topic,tag,delay_level,payload)"
-            + " VALUES (?,?,?,?,?,?,?,?)",
-        eventId,
-        type,
-        aggregate,
-        id,
-        topic,
-        tag,
-        delay,
-        Values.json(payload));
+    outbox.appendEvent(eventId, type, aggregate, id, topic, tag, delay, Values.json(payload));
   }
 
   public void invalidate(long productId) {
@@ -67,10 +61,7 @@ public class Events {
 
   public void log(
       String action, String target, long id, Long actor, Object before, Object after, String key) {
-    db.update(
-        "INSERT INTO"
-            + " operation_log(actor_type,actor_id,action,target_type,target_id,request_key,before_state,after_state,trace_id)"
-            + " VALUES (?,?,?,?,?,?,?,?,?)",
+    operationLogs.appendLog(
         actor == null ? "SYSTEM" : "USER",
         actor,
         action,

@@ -1,8 +1,10 @@
 package com.lsy.minimall.security;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lsy.minimall.auth.AuthService;
 import com.lsy.minimall.common.*;
-import com.lsy.minimall.infrastructure.Db;
+import com.lsy.minimall.infrastructure.*;
+import com.lsy.minimall.persistence.mapper.*;
 import jakarta.servlet.*;
 import jakarta.servlet.http.*;
 import java.io.IOException;
@@ -16,12 +18,12 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 @Component
 public class BearerFilter extends OncePerRequestFilter {
-  private final Db db;
+  private final MallUserMapper users;
   private final StringRedisTemplate redis;
   private final ObjectMapper mapper;
 
-  public BearerFilter(Db db, StringRedisTemplate redis, ObjectMapper mapper) {
-    this.db = db;
+  public BearerFilter(MallUserMapper users, StringRedisTemplate redis, ObjectMapper mapper) {
+    this.users = users;
     this.redis = redis;
     this.mapper = mapper;
   }
@@ -36,14 +38,20 @@ public class BearerFilter extends OncePerRequestFilter {
         return;
       }
       try {
-        String user = redis.opsForValue().get("auth:session:" + Values.hash(header.substring(7)));
+        String sessionKey = "auth:session:" + Values.hash(header.substring(7));
+        String user = redis.opsForValue().get(sessionKey);
         if (user == null) {
           error(res, 401, "UNAUTHENTICATED", "登录已过期");
           return;
         }
-        var row = db.row("SELECT id,role,status FROM mall_user WHERE id=?", user);
+        var row = users.findIdentityById(user);
         if (row == null || !"ACTIVE".equals(row.get("status"))) {
           error(res, 401, "UNAUTHENTICATED", "账户不可用");
+          return;
+        }
+        // 认证通过后滑动续期；EXPIRE 不会重建已过期或已退出删除的会话。
+        if (!Boolean.TRUE.equals(redis.expire(sessionKey, AuthService.SESSION_TTL))) {
+          error(res, 401, "UNAUTHENTICATED", "登录已过期");
           return;
         }
         var actor = new Actor(Values.num(row.get("id")), Values.text(row.get("role")));

@@ -1,4 +1,4 @@
-package com.lsy.minimall.infrastructure;
+package com.lsy.minimall.support;
 
 import java.sql.*;
 import java.time.*;
@@ -7,11 +7,12 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.*;
 import org.springframework.stereotype.Component;
 
+/** Test-only JDBC fixture: arrange and independently inspect MyBatis writes. */
 @Component
-public class Db {
+public class DatabaseFixture {
   public final JdbcTemplate jdbc;
 
-  public Db(JdbcTemplate jdbc) {
+  public DatabaseFixture(JdbcTemplate jdbc) {
     this.jdbc = jdbc;
   }
 

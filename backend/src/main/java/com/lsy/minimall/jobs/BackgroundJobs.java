@@ -3,6 +3,9 @@ package com.lsy.minimall.jobs;
 import com.lsy.minimall.common.Values;
 import com.lsy.minimall.infrastructure.*;
 import com.lsy.minimall.order.OrderService;
+import com.lsy.minimall.persistence.MapperRows;
+import com.lsy.minimall.persistence.mapper.*;
+import com.lsy.minimall.product.ProductMapper;
 import java.util.*;
 import org.slf4j.*;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -12,14 +15,30 @@ import org.springframework.stereotype.Component;
 @Component
 @ConditionalOnProperty(name = "app.jobs.enabled", havingValue = "true", matchIfMissing = true)
 public class BackgroundJobs {
-  private final Db db;
+  private final MallOrderMapper orderMapper;
+  private final OutboxEventMapper outbox;
+  private final PaymentRecordMapper paymentRecords;
+  private final ProductMapper products;
+  private final SeckillActivityMapper activityMapper;
   private final OrderService orders;
   private final Transactions tx;
   private final Events events;
   private final Logger log = LoggerFactory.getLogger(getClass());
 
-  public BackgroundJobs(Db db, OrderService orders, Transactions tx, Events events) {
-    this.db = db;
+  public BackgroundJobs(
+      MallOrderMapper orderMapper,
+      OutboxEventMapper outbox,
+      PaymentRecordMapper paymentRecords,
+      ProductMapper products,
+      SeckillActivityMapper activityMapper,
+      OrderService orders,
+      Transactions tx,
+      Events events) {
+    this.orderMapper = orderMapper;
+    this.outbox = outbox;
+    this.paymentRecords = paymentRecords;
+    this.products = products;
+    this.activityMapper = activityMapper;
     this.orders = orders;
     this.tx = tx;
     this.events = events;
@@ -27,10 +46,7 @@ public class BackgroundJobs {
 
   @Scheduled(fixedDelay = 30000, initialDelay = 5000)
   public void closeExpired() {
-    for (var row :
-        db.rows(
-            "SELECT id FROM mall_order WHERE status='PENDING_PAYMENT' AND"
-                + " expires_at<=UTC_TIMESTAMP(3) ORDER BY expires_at,id LIMIT 100"))
+    for (var row : orderMapper.findExpiredPendingOrders())
       try {
         orders.closeExpired(Values.num(row.get("id")));
       } catch (Exception e) {
@@ -40,29 +56,18 @@ public class BackgroundJobs {
 
   @Scheduled(fixedDelay = 30000, initialDelay = 5000)
   public void endActivities() {
-    db.update(
-        "UPDATE seckill_activity SET status='ENDED',version=version+1 WHERE status='PUBLISHED' AND"
-            + " end_at<=UTC_TIMESTAMP(3)");
+    activityMapper.endExpiredActivities();
   }
 
   @Scheduled(fixedDelay = 60000, initialDelay = 20000)
   public void repairRefunds() {
-    for (var row :
-        db.rows(
-            "SELECT id,order_id FROM payment_record WHERE status='REFUND_PENDING' AND"
-                + " updated_at<TIMESTAMPADD(SECOND,-30,UTC_TIMESTAMP(3)) LIMIT 100"))
+    for (var row : paymentRecords.findRefundsToRepair())
       tx.run(
           () -> {
-            db.require("SELECT id FROM mall_order WHERE id=? FOR UPDATE", row.get("orderId"));
-            var p =
-                db.require(
-                    "SELECT status FROM payment_record WHERE id=? FOR UPDATE", row.get("id"));
+            MapperRows.require(orderMapper.findIdentityByIdForUpdate(row.get("orderId")));
+            var p = MapperRows.require(paymentRecords.findStatusByIdForUpdate(row.get("id")));
             if (!"REFUND_PENDING".equals(p.get("status"))) return;
-            var old =
-                db.row(
-                    "SELECT * FROM outbox_event WHERE event_type='MOCK_REFUND_REQUESTED' AND"
-                        + " aggregate_id=? ORDER BY id DESC LIMIT 1 FOR UPDATE",
-                    row.get("id"));
+            var old = outbox.findLatestRefundEventForUpdate(row.get("id"));
             if (old == null)
               events.add(
                   "MOCK_REFUND_REQUESTED",
@@ -71,29 +76,17 @@ public class BackgroundJobs {
                   Map.of("paymentId", row.get("id")),
                   0);
             else if (Set.of("FAILED", "PUBLISHED").contains(Values.text(old.get("status"))))
-              db.update(
-                  "UPDATE outbox_event SET"
-                      + " status='PENDING',next_attempt_at=UTC_TIMESTAMP(3),lease_until=NULL,last_error='Refund"
-                      + " repair requested' WHERE id=?",
-                  old.get("id"));
+              outbox.retryRefundEvent(old.get("id"));
           });
   }
 
   @Scheduled(fixedDelay = 300000, initialDelay = 60000)
   public void auditStock() {
-    var product =
-        db.rows(
-            "SELECT p.id,p.stock_available,COALESCE(SUM(l.delta),0) ledger_balance FROM product p"
-                + " LEFT JOIN inventory_ledger l ON l.pool_type='PRODUCT' AND l.pool_id=p.id GROUP"
-                + " BY p.id HAVING p.stock_available<>ledger_balance");
-    var activity =
-        db.rows(
-            "SELECT a.id,a.stock_available,COALESCE(SUM(l.delta),0) ledger_balance FROM"
-                + " seckill_activity a LEFT JOIN inventory_ledger l ON l.pool_type='ACTIVITY' AND"
-                + " l.pool_id=a.id GROUP BY a.id HAVING a.stock_available<>ledger_balance");
+    var product = products.auditStock();
+    var activity = activityMapper.auditStock();
     if (!product.isEmpty() || !activity.isEmpty())
       log.error("Inventory ledger mismatch product={},activity={}", product, activity);
-    long failed = db.count("SELECT COUNT(*) FROM outbox_event WHERE status='FAILED'");
+    long failed = outbox.countFailed();
     if (failed > 0) log.error("Failed Outbox events: {}", failed);
   }
 }

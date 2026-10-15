@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lsy.minimall.common.*;
 import com.lsy.minimall.infrastructure.*;
 import com.lsy.minimall.inventory.InventoryService;
+import com.lsy.minimall.persistence.MapperRows;
+import com.lsy.minimall.persistence.mapper.*;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
@@ -14,67 +16,47 @@ import org.springframework.stereotype.Service;
 
 @Service
 public class ProductService {
-  private final Db db;
+  private final ProductMapper products;
   private final Transactions tx;
   private final InventoryService inventory;
   private final Events events;
   private final Operations ops;
   private final StringRedisTemplate redis;
   private final ObjectMapper mapper;
-  private final ProductMapper productMapper;
   private final Semaphore databaseReads = new Semaphore(8);
 
   public ProductService(
-      Db db,
+      ProductMapper products,
       Transactions tx,
       InventoryService inventory,
       Events events,
       Operations ops,
       StringRedisTemplate redis,
-      ObjectMapper mapper,
-      ProductMapper productMapper) {
-    this.db = db;
+      ObjectMapper mapper) {
+    this.products = products;
     this.tx = tx;
     this.inventory = inventory;
     this.events = events;
     this.ops = ops;
     this.redis = redis;
     this.mapper = mapper;
-    this.productMapper = productMapper;
   }
 
   public Map<String, Object> page(
       boolean admin, int page, int size, String category, String keyword, String status) {
     page = Math.max(1, page);
     size = Values.size(size);
-    String where = admin ? " WHERE 1=1" : " WHERE status='ON_SALE'";
-    List<Object> args = new ArrayList<>();
-    if (category != null && !category.isBlank()) {
-      where += " AND category_code=?";
-      args.add(category);
-    }
-    if (keyword != null && !keyword.isBlank()) {
-      if (keyword.length() > 50) throw BusinessException.bad("关键词过长");
-      where += " AND name LIKE ?";
-      args.add("%" + keyword + "%");
-    }
-    if (admin && status != null && !status.isBlank()) {
-      where += " AND status=?";
-      args.add(status);
-    }
-    long total = db.count("SELECT COUNT(*) FROM product" + where, args.toArray());
-    args.add(size);
-    args.add((page - 1) * size);
+    if (keyword != null && keyword.length() > 50) throw BusinessException.bad("关键词过长");
+    var result = products.findPage(admin, page, size, category, keyword, status);
     return Map.of(
         "items",
-        db.rows(
-            "SELECT * FROM product" + where + " ORDER BY id DESC LIMIT ? OFFSET ?", args.toArray()),
+        MapperRows.list(result.getRecords()),
         "page",
         page,
         "size",
         size,
         "total",
-        total);
+        result.getTotal());
   }
 
   @SuppressWarnings("unchecked")
@@ -121,19 +103,17 @@ public class ProductService {
     boolean permitted = databaseReads.tryAcquire();
     try {
       if (!permitted) throw new BusinessException("DEPENDENCY_UNAVAILABLE", "商品查询繁忙，请稍后重试", 503);
-      Product product = productMapper.selectById(id);
-      if (product == null || !"ON_SALE".equals(product.status)) {
+      var row = products.findDetailById(id);
+      if (row == null || !"ON_SALE".equals(row.get("status"))) {
         try {
           cacheIfCurrent(id, generation, lock, owner, "null", 20);
         } catch (Exception ignored) {
         }
         throw BusinessException.missing();
       }
-      var row = db.require("SELECT * FROM product WHERE id=?", id);
-      if (!"ON_SALE".equals(row.get("status"))) throw BusinessException.missing();
-      row.put("serverNow", db.now().toString());
       try {
-        cacheIfCurrent(id, generation, lock, owner, Values.json(row), 60 + new Random().nextInt(61));
+        cacheIfCurrent(
+            id, generation, lock, owner, Values.json(row), 60 + new Random().nextInt(61));
       } catch (Exception ignored) {
       }
       return row;
@@ -153,12 +133,19 @@ public class ProductService {
     }
   }
 
-  private void cacheIfCurrent(long id, String generation, String lock, String owner, String payload, int ttl) {
+  private void cacheIfCurrent(
+      long id, String generation, String lock, String owner, String payload, int ttl) {
     if (generation == null) return; // Redis failed before the DB read; skip cache population.
-    redis.execute(new DefaultRedisScript<>(
-        "if (redis.call('GET',KEYS[1]) or '0')==ARGV[1] and redis.call('GET',KEYS[3])==ARGV[2] then "
-            + "redis.call('SET',KEYS[2],ARGV[3],'EX',ARGV[4]); return 1 end; return 0", Long.class),
-        List.of("product:generation:" + id, "product:detail:" + id, lock), generation, owner, payload, Integer.toString(ttl));
+    redis.execute(
+        new DefaultRedisScript<>(
+            "if (redis.call('GET',KEYS[1]) or '0')==ARGV[1] and redis.call('GET',KEYS[3])==ARGV[2]"
+                + " then redis.call('SET',KEYS[2],ARGV[3],'EX',ARGV[4]); return 1 end; return 0",
+            Long.class),
+        List.of("product:generation:" + id, "product:detail:" + id, lock),
+        generation,
+        owner,
+        payload,
+        Integer.toString(ttl));
   }
 
   public Map<String, Object> create(Map<String, Object> b, long actor) {
@@ -168,10 +155,7 @@ public class ProductService {
     return tx.run(
         () -> {
           long id =
-              db.insert(
-                  "INSERT INTO"
-                      + " product(name,category_code,specification,description,image_url,price_fen)"
-                      + " VALUES (?,?,?,?,?,?)",
+              products.createProduct(
                   b.get("name"),
                   b.get("categoryCode"),
                   b.getOrDefault("specification", ""),
@@ -181,7 +165,7 @@ public class ProductService {
           if (stock > 0)
             inventory.change(
                 "PRODUCT", id, id, stock, "PRODUCT_INIT:" + id, "INIT", null, null, actor);
-          var result = db.require("SELECT * FROM product WHERE id=?", id);
+          var result = MapperRows.require(products.findById(id));
           events.log("PRODUCT_CREATE", "PRODUCT", id, actor, null, result, null);
           return result;
         });
@@ -191,13 +175,10 @@ public class ProductService {
     validate(b);
     return tx.run(
         () -> {
-          var before = db.require("SELECT * FROM product WHERE id=? FOR UPDATE", id);
+          var before = MapperRows.require(products.findByIdForUpdate(id));
           if (Values.num(before.get("version")) != Values.num(b.get("version")))
             throw BusinessException.conflict("VERSION_CONFLICT", "商品已被修改，请刷新");
-          db.update(
-              "UPDATE product SET"
-                  + " name=?,category_code=?,specification=?,description=?,image_url=?,price_fen=?,version=version+1"
-                  + " WHERE id=?",
+          products.editProduct(
               b.get("name"),
               b.get("categoryCode"),
               b.getOrDefault("specification", ""),
@@ -206,7 +187,7 @@ public class ProductService {
               Values.num(b.get("priceFen")),
               id);
           events.invalidate(id);
-          var result = db.require("SELECT * FROM product WHERE id=?", id);
+          var result = MapperRows.require(products.findById(id));
           events.log("PRODUCT_EDIT", "PRODUCT", id, actor, before, result, null);
           return result;
         });
@@ -216,13 +197,13 @@ public class ProductService {
     if (!Set.of("ON_SALE", "OFF_SALE").contains(action)) throw BusinessException.bad("商品状态动作无效");
     return tx.run(
         () -> {
-          var row = db.require("SELECT * FROM product WHERE id=? FOR UPDATE", id);
+          var row = MapperRows.require(products.findByIdForUpdate(id));
           if (Values.num(row.get("version")) != version)
             throw BusinessException.conflict("VERSION_CONFLICT", "商品已被修改");
-          db.update("UPDATE product SET status=?,version=version+1 WHERE id=?", action, id);
+          products.setStatus(action, id);
           events.invalidate(id);
           events.log("PRODUCT_STATUS", "PRODUCT", id, actor, row, Map.of("status", action), null);
-          return db.require("SELECT * FROM product WHERE id=?", id);
+          return MapperRows.require(products.findById(id));
         });
   }
 
@@ -239,7 +220,7 @@ public class ProductService {
         key,
         b,
         () -> {
-          db.require("SELECT id FROM product WHERE id=? FOR UPDATE", id);
+          MapperRows.require(products.findIdentityByIdForUpdate(id));
           inventory.change(
               "PRODUCT",
               id,
@@ -250,7 +231,7 @@ public class ProductService {
               null,
               null,
               actor);
-          return db.require("SELECT * FROM product WHERE id=?", id);
+          return MapperRows.require(products.findById(id));
         });
   }
 

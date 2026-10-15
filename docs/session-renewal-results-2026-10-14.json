@@ -1,0 +1,36 @@
+{
+  "date": "2026-10-14",
+  "command": "mvn -B -ntp verify",
+  "totals": {
+    "tests": 44.0,
+    "failures": 0.0,
+    "errors": 0.0,
+    "skipped": 0.0
+  },
+  "suites": [
+    {
+      "suite": "com.lsy.minimall.ValuesTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.lsy.minimall.CommerceIT",
+      "tests": 38,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  ],
+  "sessionCases": [
+    "authenticatedRequestsRenewSessionForTwoHours",
+    "expiredAndUnknownSessionsAreNotRecreated",
+    "logoutDeletesRenewedSessionAndOldTokenRemainsInvalid",
+    "disabledAccountDoesNotRenewSession",
+    "sessionDeletedDuringIdentityCheckCannotBeRenewed"
+  ],
+  "sessionTtlSeconds": 7200,
+  "runtimeRestarted": false,
+  "runtimeDockerRebuilt": false
+}

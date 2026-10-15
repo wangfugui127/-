@@ -19,7 +19,15 @@ flowchart LR
   J[超时/活动结束/退款修复/库存审计] --> D
 ```
 
-## 12张表的职责
+## 数据访问
+
+登录会话保存为 Redis `auth:session:<Token哈希> → 用户ID`，初始有效期 2 小时。BearerFilter 在每次认证通过、账户有效后对现有 key 执行 EXPIRE，将有效期重置为 2 小时；Token 不轮换，后台轮询也会续期。无效/过期会话及禁用账户不续期；读取后会话已被删除时续期失败，返回 401，不重新创建会话。退出继续删除当前会话。
+
+业务代码通过各表的 MyBatis-Plus Mapper 访问 MySQL，不再依赖 Db / JdbcTemplate，也不在 Service 中拼接 SQL。基础插入、条件查询和分页分别使用 BaseMapper.insert、QueryWrapper、分页插件；条件库存更新、联表和 Outbox 领取等特殊操作由 Mapper 中的绑定参数 SQL 表达。Spring 事务仍覆盖订单、明细、库存账本、消费去重和 Outbox 的所有写入。
+
+MapperRows 仅整理返回值：字段转驼峰、ID 转字符串、时间转 UTC 文本，缺少必需记录时抛业务异常。MyBatis 配置 call-setters-on-nulls 保留空字段，local-cache-scope=STATEMENT 保证同一事务内每次时间查询与锁查询都访问数据库。测试专用 DatabaseFixture 用 JDBC 独立准备和核验数据，不进入业务 JAR。
+
+## 13张表的职责
 
 | 表 | 职责 | 关键约束 |
 |---|---|---|

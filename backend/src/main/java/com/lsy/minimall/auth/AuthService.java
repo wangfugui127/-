@@ -1,7 +1,9 @@
 package com.lsy.minimall.auth;
 
 import com.lsy.minimall.common.*;
-import com.lsy.minimall.infrastructure.Db;
+import com.lsy.minimall.infrastructure.*;
+import com.lsy.minimall.persistence.MapperRows;
+import com.lsy.minimall.persistence.mapper.*;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Duration;
@@ -13,12 +15,15 @@ import org.springframework.stereotype.Service;
 
 @Service
 public class AuthService {
-  private final Db db;
+  public static final Duration SESSION_TTL = Duration.ofHours(2);
+
+  private final MallUserMapper users;
+  // 注册时生成密码哈希，登录时检查密码是否匹配。
   private final PasswordEncoder encoder;
   private final StringRedisTemplate redis;
 
-  public AuthService(Db db, PasswordEncoder encoder, StringRedisTemplate redis) {
-    this.db = db;
+  public AuthService(MallUserMapper users, PasswordEncoder encoder, StringRedisTemplate redis) {
+    this.users = users;
     this.encoder = encoder;
     this.redis = redis;
   }
@@ -26,11 +31,7 @@ public class AuthService {
   public Map<String, Object> register(String username, String password) {
     validate(username, password);
     try {
-      long id =
-          db.insert(
-              "INSERT INTO mall_user(username,password_hash) VALUES (?,?)",
-              username.toLowerCase(Locale.ROOT),
-              encoder.encode(password));
+      long id = users.createUser(username.toLowerCase(Locale.ROOT), encoder.encode(password));
       return Map.of("id", Long.toString(id), "username", username.toLowerCase(Locale.ROOT));
     } catch (DuplicateKeyException e) {
       throw BusinessException.conflict("USERNAME_EXISTS", "用户名已存在");
@@ -38,7 +39,7 @@ public class AuthService {
   }
 
   public Map<String, Object> login(String username, String password) {
-    var row = db.row("SELECT * FROM mall_user WHERE username=?", username.toLowerCase(Locale.ROOT));
+    var row = users.findByUsername(username.toLowerCase(Locale.ROOT));
     if (row == null
         || !"ACTIVE".equals(row.get("status"))
         || !encoder.matches(password, Values.text(row.get("passwordHash"))))
@@ -48,20 +49,20 @@ public class AuthService {
     String token = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
     redis
         .opsForValue()
-        .set("auth:session:" + Values.hash(token), Values.text(row.get("id")), Duration.ofHours(2));
+        .set("auth:session:" + Values.hash(token), Values.text(row.get("id")), SESSION_TTL);
     return Map.of(
         "token",
         token,
         "tokenType",
         "Bearer",
         "expiresIn",
-        7200,
+        SESSION_TTL.toSeconds(),
         "user",
         me(Values.num(row.get("id"))));
   }
 
   public Map<String, Object> me(long id) {
-    return db.require("SELECT id,username,role,status FROM mall_user WHERE id=?", id);
+    return MapperRows.require(users.findProfileById(id));
   }
 
   public void logout(String header) {
@@ -69,13 +70,9 @@ public class AuthService {
   }
 
   public void bootstrap(String password) {
-    if (password == null
-        || password.isBlank()
-        || db.count("SELECT COUNT(*) FROM mall_user WHERE username='admin'") > 0) return;
+    if (password == null || password.isBlank() || users.countAdministrators() > 0) return;
     validate("admin", password);
-    db.update(
-        "INSERT INTO mall_user(username,password_hash,role) VALUES ('admin',?,'ADMIN')",
-        encoder.encode(password));
+    users.createAdministrator(encoder.encode(password));
   }
 
   private void validate(String username, String password) {

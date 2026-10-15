@@ -3,6 +3,9 @@ package com.lsy.minimall.order;
 import com.lsy.minimall.common.*;
 import com.lsy.minimall.infrastructure.*;
 import com.lsy.minimall.inventory.InventoryService;
+import com.lsy.minimall.persistence.MapperRows;
+import com.lsy.minimall.persistence.mapper.*;
+import com.lsy.minimall.product.ProductMapper;
 import java.sql.Timestamp;
 import java.time.*;
 import java.util.*;
@@ -12,19 +15,43 @@ import org.springframework.stereotype.Service;
 
 @Service
 public class OrderService {
-  private final Db db;
+  private final CartItemMapper cartItems;
+  private final ClockMapper clock;
+  private final MallOrderMapper orderMapper;
+  private final OperationLogMapper operationLogs;
+  private final OrderCreationLockMapper creationLocks;
+  private final OrderItemMapper orderItems;
+  private final PaymentRecordMapper paymentRecords;
+  private final ProductMapper products;
+  private final SeckillActivityMapper activityMapper;
   private final Transactions tx;
   private final InventoryService stock;
   private final Events events;
   private final int timeout;
 
   public OrderService(
-      Db db,
+      CartItemMapper cartItems,
+      ClockMapper clock,
+      MallOrderMapper orderMapper,
+      OperationLogMapper operationLogs,
+      OrderCreationLockMapper creationLocks,
+      OrderItemMapper orderItems,
+      PaymentRecordMapper paymentRecords,
+      ProductMapper products,
+      SeckillActivityMapper activityMapper,
       Transactions tx,
       InventoryService stock,
       Events events,
       @Value("${app.order.timeout-minutes}") int timeout) {
-    this.db = db;
+    this.cartItems = cartItems;
+    this.clock = clock;
+    this.orderMapper = orderMapper;
+    this.operationLogs = operationLogs;
+    this.creationLocks = creationLocks;
+    this.orderItems = orderItems;
+    this.paymentRecords = paymentRecords;
+    this.products = products;
+    this.activityMapper = activityMapper;
     this.tx = tx;
     this.stock = stock;
     this.events = events;
@@ -104,16 +131,15 @@ public class OrderService {
     if ("CART".equals(b.get("source"))) {
       input = new ArrayList<>();
       for (String id : carts) {
-        var c = db.require("SELECT * FROM cart_item WHERE id=? AND user_id=?", id, user);
+        var c = MapperRows.require(cartItems.findByIdAndUser(id, user));
         input.add(Map.of("productId", c.get("productId"), "quantity", c.get("quantity")));
       }
       input.sort(Comparator.comparingLong(m -> Values.num(m.get("productId"))));
       for (var item : input)
-        db.require("SELECT id FROM product WHERE id=? FOR UPDATE", item.get("productId"));
+        MapperRows.require(products.findIdentityByIdForUpdate(item.get("productId")));
       input = new ArrayList<>();
       for (String cart : carts) {
-        var c =
-            db.require("SELECT * FROM cart_item WHERE id=? AND user_id=? FOR UPDATE", cart, user);
+        var c = MapperRows.require(cartItems.findByIdAndUserForUpdate(cart, user));
         input.add(Map.of("productId", c.get("productId"), "quantity", c.get("quantity")));
       }
       input.sort(Comparator.comparingLong(m -> Values.num(m.get("productId"))));
@@ -123,7 +149,7 @@ public class OrderService {
     for (var item : input) {
       long id = Values.num(item.get("productId"));
       int quantity = Math.toIntExact(Values.num(item.get("quantity")));
-      var p = db.require("SELECT * FROM product WHERE id=? FOR UPDATE", id);
+      var p = MapperRows.require(products.findByIdForUpdate(id));
       if (!"ON_SALE".equals(p.get("status")))
         throw BusinessException.conflict("PRODUCT_UNAVAILABLE", "商品已下架");
       long subtotal = Values.money(Values.num(p.get("priceFen")), quantity);
@@ -139,8 +165,7 @@ public class OrderService {
       throw BusinessException.conflict("PRICE_CHANGED", "商品价格有变化，请刷新确认");
     var rec = (Map<String, String>) b.get("receiver");
     long id = insertOrder(user, key, hash, "NORMAL", null, total, rec);
-    String no =
-        Values.text(db.require("SELECT order_no FROM mall_order WHERE id=?", id).get("orderNo"));
+    String no = Values.text(MapperRows.require(orderMapper.findOrderNoById(id)).get("orderNo"));
     for (var p : lines) {
       long product = Values.num(p.get("id"));
       int qty = Math.toIntExact(Values.num(p.get("quantity")));
@@ -156,25 +181,24 @@ public class OrderService {
           null,
           user);
     }
-    for (String cart : carts)
-      db.update("DELETE FROM cart_item WHERE id=? AND user_id=?", cart, user);
+    for (String cart : carts) cartItems.deleteByIdAndUser(cart, user);
     afterCreate(id, user);
     return detail(id, user, false);
   }
 
   // Acquire before any snapshot read; all order-creation paths share this lock.
   public void lockOrderCreator(long user) {
-    db.update("INSERT INTO order_creation_lock(user_id) VALUES (?) ON DUPLICATE KEY UPDATE user_id=VALUES(user_id)", user);
-    db.require("SELECT user_id FROM order_creation_lock WHERE user_id=? FOR UPDATE", user);
+    creationLocks.ensureGate(user);
+    MapperRows.require(creationLocks.lockGate(user));
   }
 
   public void requirePendingCapacity(long user) {
-    if (db.count("SELECT COUNT(*) FROM mall_order WHERE user_id=? AND status='PENDING_PAYMENT'", user) >= 20)
+    if (orderMapper.countPendingByUser(user) >= 20)
       throw BusinessException.conflict("PENDING_ORDER_LIMIT", "待付款订单过多，请先处理");
   }
 
   public Map<String, Object> existing(long user, String key, String hash) {
-    var row = db.row("SELECT * FROM mall_order WHERE user_id=? AND request_key=?", user, key);
+    var row = orderMapper.findByUserAndRequest(user, key);
     if (row == null) return null;
     if (!hash.equals(row.get("requestHash")))
       throw BusinessException.conflict("IDEMPOTENCY_CONFLICT", "相同请求键内容不同");
@@ -189,10 +213,7 @@ public class OrderService {
       Long activity,
       long total,
       Map<String, String> rec) {
-    return db.insert(
-        "INSERT INTO"
-            + " mall_order(order_no,user_id,order_type,activity_id,status,total_fen,payable_fen,request_key,request_hash,receiver_name,receiver_phone,receiver_address,expires_at)"
-            + " VALUES (?,?,?,?,'PENDING_PAYMENT',?,?,?,?,?,?,?,?)",
+    return orderMapper.createOrder(
         Values.id(),
         user,
         type,
@@ -204,15 +225,12 @@ public class OrderService {
         rec.get("name"),
         rec.get("phone"),
         rec.get("address"),
-        Timestamp.from(db.now().plusSeconds(timeout * 60L)));
+        Timestamp.from(clock.now().plusSeconds(timeout * 60L)));
   }
 
   public void insertItem(
       long id, Map<String, Object> p, int quantity, long price, String pool, Long activity) {
-    db.update(
-        "INSERT INTO"
-            + " order_item(order_id,product_id,product_name,specification,image_url,unit_price_fen,quantity,subtotal_fen,stock_source,activity_id)"
-            + " VALUES (?,?,?,?,?,?,?,?,?,?)",
+    orderItems.appendItem(
         id,
         Values.num(p.get("id")),
         p.get("name"),
@@ -236,18 +254,10 @@ public class OrderService {
   }
 
   public Map<String, Object> detail(long id, long user, boolean admin) {
-    var order =
-        db.require(
-            "SELECT * FROM mall_order WHERE id=?" + (admin ? "" : " AND user_id=?"),
-            admin ? new Object[] {id} : new Object[] {id, user});
-    order.put("items", db.rows("SELECT * FROM order_item WHERE order_id=? ORDER BY id", id));
-    order.put(
-        "payment",
-        db.row(
-            "SELECT id,payment_no,status,amount_fen,paid_at,refunded_at,request_key FROM payment_record WHERE"
-                + " order_id=? ORDER BY id DESC LIMIT 1",
-            id));
-    order.put("serverNow", db.now().toString());
+    var order = MapperRows.require(orderMapper.findOwnedOrder(id, user, admin));
+    order.put("items", orderItems.findByOrder(id));
+    order.put("payment", paymentRecords.findLatestSummaryByOrder(id));
+    order.put("serverNow", clock.now().toString());
     String state = Values.text(order.get("status"));
     order.put(
         "allowedActions",
@@ -257,13 +267,7 @@ public class OrderService {
           case "PAID" -> admin ? List.of("SHIP") : List.of();
           default -> List.of();
         });
-    if (admin)
-      order.put(
-          "logs",
-          db.rows(
-              "SELECT action,actor_type,actor_id,created_at FROM operation_log WHERE"
-                  + " target_type='ORDER' AND target_id=? ORDER BY id",
-              id));
+    if (admin) order.put("logs", operationLogs.findOrderLogs(id));
     return order;
   }
 
@@ -271,45 +275,17 @@ public class OrderService {
       long user, boolean admin, int page, int size, String status, String orderNo, String userId) {
     page = Math.max(page, 1);
     size = Values.size(size);
-    String where = admin ? " WHERE 1=1" : " WHERE user_id=?";
-    List<Object> args = new ArrayList<>();
-    if (!admin) args.add(user);
-    if (status != null && !status.isBlank()) {
-      where += " AND status=?";
-      args.add(status);
-    }
-    if (admin && orderNo != null && !orderNo.isBlank()) {
-      where += " AND order_no=?";
-      args.add(orderNo);
-    }
-    if (admin && userId != null && !userId.isBlank()) {
-      where += " AND user_id=?";
-      args.add(Values.num(userId));
-    }
-    long total = db.count("SELECT COUNT(*) FROM mall_order" + where, args.toArray());
-    args.add(size);
-    args.add((page - 1) * size);
-    var orders =
-        db.rows(
-            "SELECT id,order_no,user_id,status,order_type,payable_fen,expires_at,created_at FROM"
-                + " mall_order"
-                + where
-                + " ORDER BY id DESC LIMIT ? OFFSET ?",
-            args.toArray());
-    for (var o : orders)
-      o.put(
-          "items",
-          db.rows(
-              "SELECT product_name,image_url,quantity FROM order_item WHERE order_id=?",
-              o.get("id")));
-    return Map.of("items", orders, "total", total, "page", page, "size", size);
+    Long filterUser = admin && userId != null && !userId.isBlank() ? Values.num(userId) : null;
+    var result = orderMapper.findPage(user, admin, page, size, status, orderNo, filterUser);
+    var orders = MapperRows.list(result.getRecords());
+    for (var o : orders) o.put("items", orderItems.findItemSummaries(o.get("id")));
+    return Map.of("items", orders, "total", result.getTotal(), "page", page, "size", size);
   }
 
   public Map<String, Object> cancel(long id, long user, String reason) {
     return tx.run(
         () -> {
-          var order =
-              db.require("SELECT * FROM mall_order WHERE id=? AND user_id=? FOR UPDATE", id, user);
+          var order = MapperRows.require(orderMapper.findByIdAndUserForUpdate(id, user));
           String state = Values.text(order.get("status"));
           if (state.equals("CANCELLED") || state.equals("CLOSED")) return detail(id, user, false);
           if (!state.equals("PENDING_PAYMENT"))
@@ -322,10 +298,10 @@ public class OrderService {
   public void closeExpired(long id) {
     tx.run(
         () -> {
-          var order = db.row("SELECT * FROM mall_order WHERE id=? FOR UPDATE", id);
+          var order = orderMapper.findByIdForUpdate(id);
           if (order != null
               && "PENDING_PAYMENT".equals(order.get("status"))
-              && !db.now().isBefore(Instant.parse(Values.text(order.get("expiresAt")))))
+              && !clock.now().isBefore(Instant.parse(Values.text(order.get("expiresAt")))))
             closeLocked(order, "CLOSED", "支付超时", null);
         });
   }
@@ -333,20 +309,13 @@ public class OrderService {
   public void closeLocked(Map<String, Object> order, String status, String reason, Long user) {
     long id = Values.num(order.get("id"));
     if (!"PENDING_PAYMENT".equals(order.get("status"))) return;
-    var lines = db.rows("SELECT * FROM order_item WHERE order_id=? ORDER BY product_id", id);
+    var lines = orderItems.findByOrderSortedByProduct(id);
     for (var item : lines)
-      db.require("SELECT id FROM product WHERE id=? FOR UPDATE", item.get("productId"));
+      MapperRows.require(products.findIdentityByIdForUpdate(item.get("productId")));
     for (var item : lines)
       if (item.get("activityId") != null)
-        db.require("SELECT id FROM seckill_activity WHERE id=? FOR UPDATE", item.get("activityId"));
-    if (db.update(
-            "UPDATE mall_order SET"
-                + " status=?,cancel_reason=?,cancelled_at=UTC_TIMESTAMP(3),version=version+1 WHERE"
-                + " id=? AND status='PENDING_PAYMENT'",
-            status,
-            reason,
-            id)
-        != 1) return;
+        MapperRows.require(activityMapper.findIdentityByIdForUpdate(item.get("activityId")));
+    if (orderMapper.closePending(status, reason, id) != 1) return;
     for (var item : lines) {
       long product = Values.num(item.get("productId"));
       boolean activity = "ACTIVITY".equals(item.get("stockSource"));
@@ -377,19 +346,13 @@ public class OrderService {
         tracking = Values.required(b.get("trackingNo"), 64);
     return tx.run(
         () -> {
-          var row = db.require("SELECT * FROM mall_order WHERE id=? FOR UPDATE", id);
+          var row = MapperRows.require(orderMapper.findByIdForUpdate(id));
           if ("SHIPPED".equals(row.get("status"))
               && company.equals(row.get("logisticsCompany"))
               && tracking.equals(row.get("trackingNo"))) return detail(id, actor, true);
           if (!"PAID".equals(row.get("status")))
             throw BusinessException.conflict("ORDER_STATE_CONFLICT", "只有已付款订单可发货");
-          db.update(
-              "UPDATE mall_order SET"
-                  + " status='SHIPPED',logistics_company=?,tracking_no=?,shipped_at=UTC_TIMESTAMP(3),version=version+1"
-                  + " WHERE id=? AND status='PAID'",
-              company,
-              tracking,
-              id);
+          orderMapper.shipPaid(company, tracking, id);
           events.log("ORDER_SHIP", "ORDER", id, actor, row, Map.of("trackingNo", tracking), null);
           return detail(id, actor, true);
         });
@@ -398,16 +361,11 @@ public class OrderService {
   public Map<String, Object> confirm(long id, long user) {
     return tx.run(
         () -> {
-          var row =
-              db.require("SELECT * FROM mall_order WHERE id=? AND user_id=? FOR UPDATE", id, user);
+          var row = MapperRows.require(orderMapper.findByIdAndUserForUpdate(id, user));
           if ("COMPLETED".equals(row.get("status"))) return detail(id, user, false);
           if (!"SHIPPED".equals(row.get("status")))
             throw BusinessException.conflict("ORDER_STATE_CONFLICT", "订单未发货");
-          db.update(
-              "UPDATE mall_order SET"
-                  + " status='COMPLETED',completed_at=UTC_TIMESTAMP(3),version=version+1 WHERE"
-                  + " id=?",
-              id);
+          orderMapper.completeOrder(id);
           events.log("ORDER_COMPLETE", "ORDER", id, user, row, Map.of("status", "COMPLETED"), null);
           return detail(id, user, false);
         });

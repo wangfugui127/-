@@ -14,7 +14,7 @@ public class AuthController {
   public AuthController(AuthService service) {
     this.service = service;
   }
-
+// 定义数据结构
   public record Credentials(@NotBlank String username, @NotBlank String password) {}
 
   @PostMapping("/register")

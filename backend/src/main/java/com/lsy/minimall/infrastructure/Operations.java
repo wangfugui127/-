@@ -2,6 +2,7 @@ package com.lsy.minimall.infrastructure;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lsy.minimall.common.*;
+import com.lsy.minimall.persistence.mapper.*;
 import java.util.*;
 import java.util.function.Supplier;
 import org.springframework.dao.DuplicateKeyException;
@@ -9,13 +10,14 @@ import org.springframework.stereotype.Component;
 
 @Component
 public class Operations {
-  private final Db db;
+  private final OperationLogMapper operationLogs;
   private final Transactions tx;
   private final Events events;
   private final ObjectMapper mapper;
 
-  public Operations(Db db, Transactions tx, Events events, ObjectMapper mapper) {
-    this.db = db;
+  public Operations(
+      OperationLogMapper operationLogs, Transactions tx, Events events, ObjectMapper mapper) {
+    this.operationLogs = operationLogs;
     this.tx = tx;
     this.events = events;
     this.mapper = mapper;
@@ -56,12 +58,7 @@ public class Operations {
 
   @SuppressWarnings("unchecked")
   private Map<String, Object> existing(long actor, String action, String key, String hash) {
-    var row =
-        db.row(
-            "SELECT after_state FROM operation_log WHERE actor_id=? AND action=? AND request_key=?",
-            actor,
-            action,
-            key);
+    var row = operationLogs.findIdempotentResult(actor, action, key);
     if (row == null) return null;
     try {
       var stored = mapper.readValue(Values.text(row.get("afterState")), Map.class);

@@ -1,0 +1,31 @@
+{
+  "date": "2026-10-14",
+  "command": "mvn -B -ntp verify",
+  "totals": {
+    "tests": 39,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "suites": [
+    {
+      "suite": "com.lsy.minimall.ValuesTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.lsy.minimall.CommerceIT",
+      "tests": 33,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  ],
+  "persistence": "13 table BaseMapper interfaces and ClockMapper",
+  "productionJdbcTemplateCalls": 0,
+  "inlineBusinessSqlOutsideMappers": 0,
+  "testJdbcFixturePackaged": false,
+  "runtimeDockerRebuilt": false
+}

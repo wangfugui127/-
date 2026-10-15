@@ -89,7 +89,7 @@ Windows 的 BuildKit 在中文构建目录上出现过 gRPC 头部错误。脚�
 
 | 模块 | 内容 |
 |---|---|
-| 登录权限 | BCrypt 密码、随机 Bearer Token、Redis 2 小时会话、角色与数据归属校验 |
+| 登录权限 | BCrypt 密码、随机 Bearer Token、Redis 2 小时滑动会话（认证成功请求续期）、角色与数据归属校验 |
 | 商品 | 新建、编辑、上下架、分页查询、分类、金额/库存维护、版本冲突检查 |
 | 详情缓存 | Redis 正缓存、空值缓存、随机 TTL、互斥加载与持有者校验释放、DB 回源并发限制 |
 | 购物车 | 添加、修改数量、删除、当前价格检查、事务内结算与清理 |
@@ -101,13 +101,13 @@ Windows 的 BuildKit 在中文构建目录上出现过 gRPC 头部错误。脚�
 | 后台任务 | 超时扫描、活动结束、退款修复、库存账本核对与失败事件告警日志 |
 | 前端 | 用户侧 9 个页面 + 后台 3 个路由，桌面/手机适配、加载错误、价格/状态提示 |
 
-12 张业务表、34 个业务接口。数据库额外存在 Flyway 的迁移记录表，它不计入业务表数量。
+13 张业务表（含用户下单锁表）、34 个业务接口。数据库额外存在 Flyway 的迁移记录表，它不计入业务表数量。
 
 ## 技术栈和目录
 
-Java 21、Spring Boot 3.5.16、Spring Security、Spring JDBC、MyBatis-Plus 3.5.17、MySQL 8.4、Redis 7.4、RocketMQ 5.3.2、Flyway、Springdoc OpenAPI；Vue 3、TypeScript、Vite 7、Vue Router、Pinia、Axios、Element Plus；JUnit 5、Testcontainers、Vitest、Playwright；Docker Compose、Nginx、Maven Wrapper、GitHub Actions。
+Java 21、Spring Boot 3.5.16、Spring Security、MyBatis-Plus 3.5.17、MySQL 8.4、Redis 7.4、RocketMQ 5.3.2、Flyway、Springdoc OpenAPI；Vue 3、TypeScript、Vite 7、Vue Router、Pinia、Axios、Element Plus；JUnit 5、Testcontainers、Vitest、Playwright；Docker Compose、Nginx、Maven Wrapper、GitHub Actions。
 
-复杂库存 SQL 使用 Spring JDBC 显式表达锁与条件更新；商品实体查询展示 MyBatis-Plus 的使用。它们共用 Spring 事务和同一个数据源。本项目是一个应用的分包模块，不是微服务。
+业务数据库访问统一使用 MyBatis-Plus Mapper：基础插入、查询和分页使用 BaseMapper / QueryWrapper，行锁、条件库存更新、联表查询和 Outbox 租约在各表 Mapper 中封装。Mapper 共用 Spring 事务和同一个数据源；MapperRows 保持响应字段驼峰、ID 字符串、空字段和 UTC 时间格式。迁移说明见 [MyBatis-Plus 数据访问迁移](docs/mybatis-plus-migration.md)。本项目是一个应用的分包模块，不是微服务。
 
 ```text
 backend/
